@@ -67,7 +67,7 @@ async function main() {
     await prisma.permission.findMany();
 
   const permissionByCode = new Map(
-    allPermissionRecords.map((permission) => [
+    allPermissionRecords.map((permission: typeof allPermissionRecords[number]) => [
       permission.code,
       permission.id,
     ])
