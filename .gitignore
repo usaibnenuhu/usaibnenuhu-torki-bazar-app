@@ -11,3 +11,11 @@ packages/database/prisma/*.db
 packages/database/prisma/*.db.*
 *.backup
 *.bak*
+
+# Build output
+**/out/
+**/dist/
+
+# Backup files
+*.backup
+*.save
