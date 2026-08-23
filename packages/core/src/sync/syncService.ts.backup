@@ -1,0 +1,357 @@
+import { prisma } from "@torki-bazar/database";
+import { neonPrisma } from "@torki-bazar/database/dist/neonClient";
+
+export type SyncStatus =
+  | "PENDING"
+  | "SYNCING"
+  | "SYNCED"
+  | "FAILED";
+
+const BATCH_SIZE = 50;
+
+export async function getSyncStatus() {
+  const [pending, failed, lastSynced] = await Promise.all([
+    prisma.syncQueue.count({
+      where: { syncStatus: "PENDING" },
+    }),
+
+    prisma.syncQueue.count({
+      where: { syncStatus: "FAILED" },
+    }),
+
+    prisma.syncQueue.findFirst({
+      where: {
+        syncStatus: "SYNCED",
+        syncedAt: { not: null },
+      },
+      orderBy: {
+        syncedAt: "desc",
+      },
+      select: {
+        syncedAt: true,
+      },
+    }),
+  ]);
+
+  return {
+    pending,
+    failed,
+    lastSyncedAt: lastSynced?.syncedAt ?? null,
+    isSyncing: false,
+  };
+}
+
+export async function getPendingSyncCount() {
+  return prisma.syncQueue.count({
+    where: {
+      syncStatus: "PENDING",
+    },
+  });
+}
+
+export async function enqueueSync(
+  entityType: string,
+  entityId: string,
+  operationType: string,
+  payload: unknown,
+  tx?: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]
+) {
+  const client = tx ?? prisma;
+
+  return client.syncQueue.create({
+    data: {
+      entityType,
+      entityId,
+      operationType,
+      payload: JSON.stringify(payload),
+      syncStatus: "PENDING",
+    },
+  });
+}
+
+async function syncProduct(productId: string) {
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+  });
+
+  if (!product) {
+    throw new Error(`Product ${productId} not found locally.`);
+  }
+
+  await neonPrisma.product.upsert({
+    where: { id: product.id },
+    create: {
+      id: product.id,
+      name: product.name,
+      imageUrl: product.imageUrl,
+      categoryId: product.categoryId,
+      subcategoryId: product.subcategoryId,
+      brandId: product.brandId,
+      sku: product.sku,
+      barcode: product.barcode,
+      unitId: product.unitId,
+      packSize: product.packSize,
+      expiryDate: product.expiryDate,
+      purchasePrice: product.purchasePrice,
+      sellingPrice: product.sellingPrice,
+      wholesalePrice: product.wholesalePrice,
+      minimumStock: product.minimumStock,
+      currentStock: product.currentStock,
+      description: product.description,
+      status: product.status,
+      defaultSupplierId: product.defaultSupplierId,
+      createdAt: product.createdAt,
+      updatedAt: product.updatedAt,
+    },
+    update: {
+      name: product.name,
+      imageUrl: product.imageUrl,
+      categoryId: product.categoryId,
+      subcategoryId: product.subcategoryId,
+      brandId: product.brandId,
+      sku: product.sku,
+      barcode: product.barcode,
+      unitId: product.unitId,
+      packSize: product.packSize,
+      expiryDate: product.expiryDate,
+      purchasePrice: product.purchasePrice,
+      sellingPrice: product.sellingPrice,
+      wholesalePrice: product.wholesalePrice,
+      minimumStock: product.minimumStock,
+      currentStock: product.currentStock,
+      description: product.description,
+      status: product.status,
+      defaultSupplierId: product.defaultSupplierId,
+      updatedAt: product.updatedAt,
+    },
+  });
+}
+
+async function syncProductBatch(batchId: string) {
+  const batch = await prisma.productBatch.findUnique({
+    where: { id: batchId },
+  });
+
+  if (!batch) {
+    throw new Error(`ProductBatch ${batchId} not found locally.`);
+  }
+
+  await neonPrisma.productBatch.upsert({
+    where: { id: batch.id },
+    create: {
+      id: batch.id,
+      productId: batch.productId,
+      supplierId: batch.supplierId,
+      purchaseId: batch.purchaseId,
+      batchCode: batch.batchCode,
+      purchaseDate: batch.purchaseDate,
+      manufacturingDate: batch.manufacturingDate,
+      quantityReceived: batch.quantityReceived,
+      remainingQuantity: batch.remainingQuantity,
+      quantityReturned: batch.quantityReturned,
+      purchasePrice: batch.purchasePrice,
+      sellingPrice: batch.sellingPrice,
+      expiryDate: batch.expiryDate,
+      purchaseInvoiceNumber: batch.purchaseInvoiceNumber,
+      notes: batch.notes,
+      status: batch.status,
+      createdAt: batch.createdAt,
+      updatedAt: batch.updatedAt,
+    },
+    update: {
+      productId: batch.productId,
+      supplierId: batch.supplierId,
+      purchaseId: batch.purchaseId,
+      batchCode: batch.batchCode,
+      purchaseDate: batch.purchaseDate,
+      manufacturingDate: batch.manufacturingDate,
+      quantityReceived: batch.quantityReceived,
+      remainingQuantity: batch.remainingQuantity,
+      quantityReturned: batch.quantityReturned,
+      purchasePrice: batch.purchasePrice,
+      sellingPrice: batch.sellingPrice,
+      expiryDate: batch.expiryDate,
+      purchaseInvoiceNumber: batch.purchaseInvoiceNumber,
+      notes: batch.notes,
+      status: batch.status,
+      updatedAt: batch.updatedAt,
+    },
+  });
+}
+
+async function syncStockMovement(movementId: string) {
+  const movement = await prisma.stockMovement.findUnique({
+    where: { id: movementId },
+  });
+
+  if (!movement) {
+    throw new Error(`StockMovement ${movementId} not found locally.`);
+  }
+
+  await neonPrisma.stockMovement.upsert({
+    where: { id: movement.id },
+    create: {
+      id: movement.id,
+      productId: movement.productId,
+      batchId: movement.batchId,
+      movementType: movement.movementType,
+      quantity: movement.quantity,
+      previousQuantity: movement.previousQuantity,
+      newQuantity: movement.newQuantity,
+      referenceType: movement.referenceType,
+      referenceId: movement.referenceId,
+      userId: movement.userId,
+      notes: movement.notes,
+      createdAt: movement.createdAt,
+    },
+    update: {
+      productId: movement.productId,
+      batchId: movement.batchId,
+      movementType: movement.movementType,
+      quantity: movement.quantity,
+      previousQuantity: movement.previousQuantity,
+      newQuantity: movement.newQuantity,
+      referenceType: movement.referenceType,
+      referenceId: movement.referenceId,
+      userId: movement.userId,
+      notes: movement.notes,
+      createdAt: movement.createdAt,
+    },
+  });
+}
+
+async function syncQueueItem(item: {
+  entityType: string;
+  entityId: string;
+  operationType: string;
+}) {
+  switch (item.entityType) {
+    case "PRODUCT":
+      await syncProduct(item.entityId);
+      return;
+
+    case "PRODUCT_BATCH": {
+      const batch = await prisma.productBatch.findUnique({
+        where: { id: item.entityId },
+      });
+
+      if (!batch) {
+        throw new Error(
+          `ProductBatch ${item.entityId} not found locally.`
+        );
+      }
+
+      await syncProduct(batch.productId);
+      await syncProductBatch(batch.id);
+
+      return;
+    }
+
+    case "STOCK_MOVEMENT":
+      {
+        const movement =
+          await prisma.stockMovement.findUnique({
+            where: { id: item.entityId },
+          });
+
+        if (!movement) {
+          throw new Error(
+            `StockMovement ${item.entityId} not found locally.`
+          );
+        }
+
+        await syncProduct(movement.productId);
+
+        if (movement.batchId) {
+          await syncProductBatch(movement.batchId);
+        }
+
+        await syncStockMovement(item.entityId);
+      }
+      return;
+
+    default:
+      throw new Error(
+        `Unsupported sync entity type: ${item.entityType}`
+      );
+  }
+}
+
+export async function syncPendingChanges() {
+  const items = await prisma.syncQueue.findMany({
+    where: {
+      syncStatus: "PENDING",
+    },
+    orderBy: {
+      createdAt: "asc",
+    },
+    take: BATCH_SIZE,
+  });
+
+  if (items.length === 0) {
+    return {
+      synced: 0,
+      failed: 0,
+      pending: 0,
+    };
+  }
+
+  let synced = 0;
+  let failed = 0;
+
+  for (const item of items) {
+    try {
+      await prisma.syncQueue.update({
+        where: {
+          id: item.id,
+        },
+        data: {
+          syncStatus: "SYNCING",
+          errorMessage: null,
+        },
+      });
+
+      await syncQueueItem(item);
+
+      await prisma.syncQueue.update({
+        where: {
+          id: item.id,
+        },
+        data: {
+          syncStatus: "SYNCED",
+          syncedAt: new Date(),
+          errorMessage: null,
+        },
+      });
+
+      synced++;
+    } catch (error) {
+      failed++;
+
+      await prisma.syncQueue.update({
+        where: {
+          id: item.id,
+        },
+        data: {
+          syncStatus: "FAILED",
+          errorMessage:
+            error instanceof Error
+              ? error.message
+              : String(error),
+        },
+      });
+    }
+  }
+
+  const pending = await prisma.syncQueue.count({
+    where: {
+      syncStatus: "PENDING",
+    },
+  });
+
+  return {
+    synced,
+    failed,
+    pending,
+  };
+}

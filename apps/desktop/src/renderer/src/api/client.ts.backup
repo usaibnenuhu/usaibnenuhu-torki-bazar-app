@@ -1,0 +1,17 @@
+// Thin, typed wrapper around the preload-exposed IPC bridge. Throws a plain
+// Error with a user-friendly message on failure so callers can rely on
+// try/catch without ever seeing raw stack traces (section 56).
+export async function call<T = unknown>(channel: string, payload?: unknown): Promise<T> {
+  if (!window.api) {
+    // Happens only if the preload bridge failed to attach (e.g. running the
+    // renderer outside Electron, or a preload/webPreferences misconfiguration).
+    throw new Error(
+      "The application's secure bridge is unavailable. Please restart Torki Bazar; if this persists, contact support."
+    );
+  }
+  const response = await window.api.invoke<T>(channel, payload);
+  if (!response.ok) {
+    throw new Error(response.message ?? "Something went wrong. Please try again.");
+  }
+  return response.data as T;
+}

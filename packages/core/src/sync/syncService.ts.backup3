@@ -1,0 +1,623 @@
+import { prisma } from "@torki-bazar/database";
+import { neonPrisma } from "@torki-bazar/database/dist/neonClient";
+
+export type SyncStatus =
+  | "PENDING"
+  | "SYNCING"
+  | "SYNCED"
+  | "FAILED";
+
+const BATCH_SIZE = 50;
+
+export async function getSyncStatus() {
+  const [pending, failed, lastSynced] = await Promise.all([
+    prisma.syncQueue.count({
+      where: { syncStatus: "PENDING" },
+    }),
+
+    prisma.syncQueue.count({
+      where: { syncStatus: "FAILED" },
+    }),
+
+    prisma.syncQueue.findFirst({
+      where: {
+        syncStatus: "SYNCED",
+        syncedAt: { not: null },
+      },
+      orderBy: {
+        syncedAt: "desc",
+      },
+      select: {
+        syncedAt: true,
+      },
+    }),
+  ]);
+
+  return {
+    pending,
+    failed,
+    lastSyncedAt: lastSynced?.syncedAt ?? null,
+    isSyncing: false,
+  };
+}
+
+export async function getPendingSyncCount() {
+  return prisma.syncQueue.count({
+    where: {
+      syncStatus: {
+        in: ["PENDING", "FAILED"],
+      },
+    },
+  });
+}
+
+export async function enqueueSync(
+  entityType: string,
+  entityId: string,
+  operationType: string,
+  payload: unknown,
+  tx?: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]
+) {
+  const client = tx ?? prisma;
+
+  return client.syncQueue.create({
+    data: {
+      entityType,
+      entityId,
+      operationType,
+      payload: JSON.stringify(payload),
+      syncStatus: "PENDING",
+    },
+  });
+}
+
+async function syncProduct(productId: string) {
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+  });
+
+  if (!product) {
+    throw new Error(`Product ${productId} not found locally.`);
+  }
+
+  /*
+   * IMPORTANT:
+   * Local PC IDs and Neon IDs for master data may be different.
+   *
+   * Therefore we resolve parent records by their unique business
+   * identity (name / category + name), then use the Neon IDs
+   * when syncing the Product.
+   */
+
+  // ------------------------------------------------------------
+  // CATEGORY
+  // ------------------------------------------------------------
+
+  const category = await prisma.category.findUnique({
+    where: { id: product.categoryId },
+  });
+
+  if (!category) {
+    throw new Error(
+      `Category ${product.categoryId} for product ${product.id} not found locally.`
+    );
+  }
+
+  let neonCategory = await neonPrisma.category.findUnique({
+    where: { name: category.name },
+  });
+
+  if (neonCategory) {
+    neonCategory = await neonPrisma.category.update({
+      where: { id: neonCategory.id },
+      data: {
+        description: category.description,
+        isArchived: category.isArchived,
+        updatedAt: category.updatedAt,
+      },
+    });
+  } else {
+    neonCategory = await neonPrisma.category.create({
+      data: {
+        id: category.id,
+        name: category.name,
+        description: category.description,
+        isArchived: category.isArchived,
+        createdAt: category.createdAt,
+        updatedAt: category.updatedAt,
+      },
+    });
+  }
+
+  const neonCategoryId = neonCategory.id;
+
+  // ------------------------------------------------------------
+  // UNIT
+  // ------------------------------------------------------------
+
+  const unit = await prisma.unit.findUnique({
+    where: { id: product.unitId },
+  });
+
+  if (!unit) {
+    throw new Error(
+      `Unit ${product.unitId} for product ${product.id} not found locally.`
+    );
+  }
+
+  let neonUnit = await neonPrisma.unit.findUnique({
+    where: { name: unit.name },
+  });
+
+  if (neonUnit) {
+    neonUnit = await neonPrisma.unit.update({
+      where: { id: neonUnit.id },
+      data: {
+        abbreviation: unit.abbreviation,
+        isArchived: unit.isArchived,
+      },
+    });
+  } else {
+    neonUnit = await neonPrisma.unit.create({
+      data: {
+        id: unit.id,
+        name: unit.name,
+        abbreviation: unit.abbreviation,
+        isArchived: unit.isArchived,
+      },
+    });
+  }
+
+  const neonUnitId = neonUnit.id;
+
+  // ------------------------------------------------------------
+  // SUBCATEGORY
+  // ------------------------------------------------------------
+
+  let neonSubcategoryId: string | null = null;
+
+  if (product.subcategoryId) {
+    const subcategory = await prisma.subcategory.findUnique({
+      where: { id: product.subcategoryId },
+    });
+
+    if (!subcategory) {
+      throw new Error(
+        `Subcategory ${product.subcategoryId} for product ${product.id} not found locally.`
+      );
+    }
+
+    let neonSubcategory = await neonPrisma.subcategory.findUnique({
+      where: {
+        categoryId_name: {
+          categoryId: neonCategoryId,
+          name: subcategory.name,
+        },
+      },
+    });
+
+    if (neonSubcategory) {
+      neonSubcategory = await neonPrisma.subcategory.update({
+        where: { id: neonSubcategory.id },
+        data: {
+          isArchived: subcategory.isArchived,
+          updatedAt: subcategory.updatedAt,
+        },
+      });
+    } else {
+      neonSubcategory = await neonPrisma.subcategory.create({
+        data: {
+          id: subcategory.id,
+          categoryId: neonCategoryId,
+          name: subcategory.name,
+          isArchived: subcategory.isArchived,
+          createdAt: subcategory.createdAt,
+          updatedAt: subcategory.updatedAt,
+        },
+      });
+    }
+
+    neonSubcategoryId = neonSubcategory.id;
+  }
+
+  // ------------------------------------------------------------
+  // BRAND
+  // ------------------------------------------------------------
+
+  let neonBrandId: string | null = null;
+
+  if (product.brandId) {
+    const brand = await prisma.brand.findUnique({
+      where: { id: product.brandId },
+    });
+
+    if (!brand) {
+      throw new Error(
+        `Brand ${product.brandId} for product ${product.id} not found locally.`
+      );
+    }
+
+    let neonBrand = await neonPrisma.brand.findUnique({
+      where: { name: brand.name },
+    });
+
+    if (neonBrand) {
+      neonBrand = await neonPrisma.brand.update({
+        where: { id: neonBrand.id },
+        data: {
+          isArchived: brand.isArchived,
+        },
+      });
+    } else {
+      neonBrand = await neonPrisma.brand.create({
+        data: {
+          id: brand.id,
+          name: brand.name,
+          isArchived: brand.isArchived,
+        },
+      });
+    }
+
+    neonBrandId = neonBrand.id;
+  }
+
+  // ------------------------------------------------------------
+  // DEFAULT SUPPLIER
+  // ------------------------------------------------------------
+
+  let neonDefaultSupplierId: string | null = null;
+
+  if (product.defaultSupplierId) {
+    const supplier = await prisma.supplier.findUnique({
+      where: { id: product.defaultSupplierId },
+    });
+
+    if (!supplier) {
+      throw new Error(
+        `Supplier ${product.defaultSupplierId} for product ${product.id} not found locally.`
+      );
+    }
+
+    /*
+     * Supplier does not have a unique name in the schema.
+     * First try the same ID. If it doesn't exist, try phone.
+     */
+    let neonSupplier = await neonPrisma.supplier.findUnique({
+      where: { id: supplier.id },
+    });
+
+    if (!neonSupplier) {
+      neonSupplier = await neonPrisma.supplier.findFirst({
+        where: { phone: supplier.phone },
+      });
+    }
+
+    if (neonSupplier) {
+      neonSupplier = await neonPrisma.supplier.update({
+        where: { id: neonSupplier.id },
+        data: {
+          name: supplier.name,
+          company: supplier.company,
+          phone: supplier.phone,
+          email: supplier.email,
+          address: supplier.address,
+          notes: supplier.notes,
+          status: supplier.status,
+          updatedAt: supplier.updatedAt,
+        },
+      });
+    } else {
+      neonSupplier = await neonPrisma.supplier.create({
+        data: {
+          id: supplier.id,
+          name: supplier.name,
+          company: supplier.company,
+          phone: supplier.phone,
+          email: supplier.email,
+          address: supplier.address,
+          notes: supplier.notes,
+          status: supplier.status,
+          createdAt: supplier.createdAt,
+          updatedAt: supplier.updatedAt,
+        },
+      });
+    }
+
+    neonDefaultSupplierId = neonSupplier.id;
+  }
+
+  // ------------------------------------------------------------
+  // PRODUCT
+  // ------------------------------------------------------------
+
+  await neonPrisma.product.upsert({
+    where: { id: product.id },
+
+    create: {
+      id: product.id,
+      name: product.name,
+      imageUrl: product.imageUrl,
+
+      categoryId: neonCategoryId,
+      subcategoryId: neonSubcategoryId,
+      brandId: neonBrandId,
+
+      sku: product.sku,
+      barcode: product.barcode,
+
+      unitId: neonUnitId,
+
+      packSize: product.packSize,
+      expiryDate: product.expiryDate,
+      purchasePrice: product.purchasePrice,
+      sellingPrice: product.sellingPrice,
+      wholesalePrice: product.wholesalePrice,
+      minimumStock: product.minimumStock,
+      currentStock: product.currentStock,
+      description: product.description,
+      status: product.status,
+
+      defaultSupplierId: neonDefaultSupplierId,
+
+      createdAt: product.createdAt,
+      updatedAt: product.updatedAt,
+    },
+
+    update: {
+      name: product.name,
+      imageUrl: product.imageUrl,
+
+      categoryId: neonCategoryId,
+      subcategoryId: neonSubcategoryId,
+      brandId: neonBrandId,
+
+      sku: product.sku,
+      barcode: product.barcode,
+
+      unitId: neonUnitId,
+
+      packSize: product.packSize,
+      expiryDate: product.expiryDate,
+      purchasePrice: product.purchasePrice,
+      sellingPrice: product.sellingPrice,
+      wholesalePrice: product.wholesalePrice,
+      minimumStock: product.minimumStock,
+      currentStock: product.currentStock,
+      description: product.description,
+      status: product.status,
+
+      defaultSupplierId: neonDefaultSupplierId,
+
+      updatedAt: product.updatedAt,
+    },
+  });
+}
+
+async function syncProductBatch(batchId: string) {
+  const batch = await prisma.productBatch.findUnique({
+    where: { id: batchId },
+  });
+
+  if (!batch) {
+    throw new Error(`ProductBatch ${batchId} not found locally.`);
+  }
+
+  await neonPrisma.productBatch.upsert({
+    where: { id: batch.id },
+    create: {
+      id: batch.id,
+      productId: batch.productId,
+      supplierId: batch.supplierId,
+      purchaseId: batch.purchaseId,
+      batchCode: batch.batchCode,
+      purchaseDate: batch.purchaseDate,
+      manufacturingDate: batch.manufacturingDate,
+      quantityReceived: batch.quantityReceived,
+      remainingQuantity: batch.remainingQuantity,
+      quantityReturned: batch.quantityReturned,
+      purchasePrice: batch.purchasePrice,
+      sellingPrice: batch.sellingPrice,
+      expiryDate: batch.expiryDate,
+      purchaseInvoiceNumber: batch.purchaseInvoiceNumber,
+      notes: batch.notes,
+      status: batch.status,
+      createdAt: batch.createdAt,
+      updatedAt: batch.updatedAt,
+    },
+    update: {
+      productId: batch.productId,
+      supplierId: batch.supplierId,
+      purchaseId: batch.purchaseId,
+      batchCode: batch.batchCode,
+      purchaseDate: batch.purchaseDate,
+      manufacturingDate: batch.manufacturingDate,
+      quantityReceived: batch.quantityReceived,
+      remainingQuantity: batch.remainingQuantity,
+      quantityReturned: batch.quantityReturned,
+      purchasePrice: batch.purchasePrice,
+      sellingPrice: batch.sellingPrice,
+      expiryDate: batch.expiryDate,
+      purchaseInvoiceNumber: batch.purchaseInvoiceNumber,
+      notes: batch.notes,
+      status: batch.status,
+      updatedAt: batch.updatedAt,
+    },
+  });
+}
+
+async function syncStockMovement(movementId: string) {
+  const movement = await prisma.stockMovement.findUnique({
+    where: { id: movementId },
+  });
+
+  if (!movement) {
+    throw new Error(`StockMovement ${movementId} not found locally.`);
+  }
+
+  await neonPrisma.stockMovement.upsert({
+    where: { id: movement.id },
+    create: {
+      id: movement.id,
+      productId: movement.productId,
+      batchId: movement.batchId,
+      movementType: movement.movementType,
+      quantity: movement.quantity,
+      previousQuantity: movement.previousQuantity,
+      newQuantity: movement.newQuantity,
+      referenceType: movement.referenceType,
+      referenceId: movement.referenceId,
+      userId: movement.userId,
+      notes: movement.notes,
+      createdAt: movement.createdAt,
+    },
+    update: {
+      productId: movement.productId,
+      batchId: movement.batchId,
+      movementType: movement.movementType,
+      quantity: movement.quantity,
+      previousQuantity: movement.previousQuantity,
+      newQuantity: movement.newQuantity,
+      referenceType: movement.referenceType,
+      referenceId: movement.referenceId,
+      userId: movement.userId,
+      notes: movement.notes,
+      createdAt: movement.createdAt,
+    },
+  });
+}
+
+async function syncQueueItem(item: {
+  entityType: string;
+  entityId: string;
+  operationType: string;
+}) {
+  switch (item.entityType) {
+    case "PRODUCT":
+      await syncProduct(item.entityId);
+      return;
+
+    case "PRODUCT_BATCH": {
+      const batch = await prisma.productBatch.findUnique({
+        where: { id: item.entityId },
+      });
+
+      if (!batch) {
+        throw new Error(
+          `ProductBatch ${item.entityId} not found locally.`
+        );
+      }
+
+      await syncProduct(batch.productId);
+      await syncProductBatch(batch.id);
+
+      return;
+    }
+
+    case "STOCK_MOVEMENT":
+      {
+        const movement =
+          await prisma.stockMovement.findUnique({
+            where: { id: item.entityId },
+          });
+
+        if (!movement) {
+          throw new Error(
+            `StockMovement ${item.entityId} not found locally.`
+          );
+        }
+
+        await syncProduct(movement.productId);
+
+        if (movement.batchId) {
+          await syncProductBatch(movement.batchId);
+        }
+
+        await syncStockMovement(item.entityId);
+      }
+      return;
+
+    default:
+      throw new Error(
+        `Unsupported sync entity type: ${item.entityType}`
+      );
+  }
+}
+
+export async function syncPendingChanges() {
+  const items = await prisma.syncQueue.findMany({
+    where: {
+      syncStatus: "PENDING",
+    },
+    orderBy: {
+      createdAt: "asc",
+    },
+    take: BATCH_SIZE,
+  });
+
+  if (items.length === 0) {
+    return {
+      synced: 0,
+      failed: 0,
+      pending: 0,
+    };
+  }
+
+  let synced = 0;
+  let failed = 0;
+
+  for (const item of items) {
+    try {
+      await prisma.syncQueue.update({
+        where: {
+          id: item.id,
+        },
+        data: {
+          syncStatus: "SYNCING",
+          errorMessage: null,
+        },
+      });
+
+      await syncQueueItem(item);
+
+      await prisma.syncQueue.update({
+        where: {
+          id: item.id,
+        },
+        data: {
+          syncStatus: "SYNCED",
+          syncedAt: new Date(),
+          errorMessage: null,
+        },
+      });
+
+      synced++;
+    } catch (error) {
+      failed++;
+
+      await prisma.syncQueue.update({
+        where: {
+          id: item.id,
+        },
+        data: {
+          syncStatus: "FAILED",
+          errorMessage:
+            error instanceof Error
+              ? error.message
+              : String(error),
+        },
+      });
+    }
+  }
+
+  const pending = await prisma.syncQueue.count({
+    where: {
+      syncStatus: "PENDING",
+    },
+  });
+
+  return {
+    synced,
+    failed,
+    pending,
+  };
+}

@@ -1,0 +1,231 @@
+import { prisma, Prisma } from "@torki-bazar/database";
+import { PERMISSIONS, INVOICE_PREFIXES, ValidationError, NotFoundError } from "@torki-bazar/shared";
+import type { AuthSession } from "../context";
+import { assertPermission } from "../context";
+import { recordAuditLog } from "../audit/auditService";
+import { nextInvoiceNumber } from "../invoicing/invoiceNumberService";
+import { recordStockMovement } from "../inventory/inventoryService";
+import { createCashTransaction } from "../cash/cashService";
+
+export const SUPPLIER_RETURN_REASONS = [
+  "DAMAGED",
+  "DEFECTIVE",
+  "WRONG_PRODUCT",
+  "WRONG_QUANTITY",
+  "EXPIRED",
+  "NEAR_EXPIRY",
+  "SUPPLIER_REQUEST",
+  "QUALITY_ISSUE",
+  "OTHER",
+] as const;
+
+export interface CreateSupplierReturnInput {
+  purchaseId: string;
+  batchId: string;
+  quantity: number;
+  reason: string;
+  notes?: string;
+  returnDate?: Date | string;
+  /** Expected supplier credit. Defaults to quantity x original purchase cost; the
+   *  supplier may agree a different amount, so it can be overridden or set to 0. */
+  returnValue?: number | null;
+  /** CREDIT offsets future purchases; CASH_REFUND is money returned by the supplier. */
+  settlementType?: "CREDIT" | "CASH_REFUND";
+}
+
+/**
+ * Units that may still be sent back to the supplier from a batch: whatever is
+ * physically left in that batch. Sold and previously returned units are already
+ * excluded because they were subtracted from remainingQuantity.
+ */
+export async function getReturnableQuantity(batchId: string) {
+  const batch = await prisma.productBatch.findUnique({
+    where: { id: batchId },
+    include: { product: true, supplier: true, purchase: true },
+  });
+  if (!batch) throw new NotFoundError("Batch not found.");
+  const received = new Prisma.Decimal(batch.quantityReceived);
+  const remaining = new Prisma.Decimal(batch.remainingQuantity);
+  const returned = new Prisma.Decimal(batch.quantityReturned);
+  return {
+    batch,
+    quantityPurchased: received,
+    quantityRemaining: remaining,
+    quantityReturned: returned,
+    quantitySold: received.sub(remaining).sub(returned),
+    maxReturnable: remaining,
+  };
+}
+
+export async function createSupplierReturn(session: AuthSession, input: CreateSupplierReturnInput) {
+  assertPermission(session, PERMISSIONS.PURCHASES_CREATE);
+  const quantity = new Prisma.Decimal(input.quantity ?? 0);
+  if (!quantity.isFinite() || quantity.lte(0)) {
+    throw new ValidationError("Return quantity must be greater than zero.");
+  }
+  if (!input.reason?.trim()) throw new ValidationError("A return reason is required.");
+
+  const created = await prisma.$transaction(async (tx) => {
+    const purchase = await tx.purchase.findUnique({ where: { id: input.purchaseId } });
+    if (!purchase) throw new NotFoundError("Original purchase not found.");
+    if (purchase.status === "VOID") throw new ValidationError("Cannot return items from a voided purchase.");
+
+    const batch = await tx.productBatch.findUnique({ where: { id: input.batchId } });
+    if (!batch) throw new NotFoundError("Batch not found.");
+    const purchaseItem = await tx.purchaseItem.findFirst({
+      where: { purchaseId: purchase.id, batchId: batch.id },
+    });
+    if (!purchaseItem) throw new ValidationError("This batch does not belong to the selected purchase.");
+
+    const remaining = new Prisma.Decimal(batch.remainingQuantity);
+    if (quantity.gt(remaining)) {
+      throw new ValidationError(
+        `Cannot return ${quantity.toString()} unit(s) — only ${remaining.toString()} remain available in this batch.`
+      );
+    }
+
+    const returnNumber = await nextInvoiceNumber(tx as unknown as typeof prisma, INVOICE_PREFIXES.SUPPLIER_RETURN, {
+      withYear: false,
+    });
+    const unitCost = new Prisma.Decimal(purchaseItem.unitCost);
+    const returnValue =
+      input.returnValue === undefined || input.returnValue === null
+        ? unitCost.mul(quantity)
+        : new Prisma.Decimal(input.returnValue);
+    if (!returnValue.isFinite() || returnValue.lt(0)) {
+      throw new ValidationError("Supplier credit cannot be negative.");
+    }
+    const newRemaining = remaining.sub(quantity);
+
+    const supplierReturn = await tx.supplierReturn.create({
+      data: {
+        returnNumber,
+        supplierId: purchase.supplierId,
+        purchaseId: purchase.id,
+        productId: batch.productId,
+        batchId: batch.id,
+        quantity,
+        unitCost,
+        returnValue,
+        returnDate: input.returnDate ? new Date(input.returnDate) : new Date(),
+        reason: input.reason.trim(),
+        notes: input.notes?.trim() || null,
+        settlementType: input.settlementType === "CASH_REFUND" ? "CASH_REFUND" : "CREDIT",
+        status: "COMPLETED",
+        createdById: session.userId,
+      },
+    });
+
+    await tx.productBatch.update({
+      where: { id: batch.id },
+      data: {
+        remainingQuantity: newRemaining,
+        quantityReturned: new Prisma.Decimal(batch.quantityReturned).add(quantity),
+        status: newRemaining.lte(0) ? "FULLY_RETURNED" : batch.status,
+      },
+    });
+
+    await recordStockMovement(tx, {
+      productId: batch.productId,
+      batchId: batch.id,
+      movementType: "ADJUSTMENT",
+      quantity: quantity.negated(),
+      referenceType: "SUPPLIER_RETURN",
+      referenceId: supplierReturn.id,
+      userId: session.userId,
+      notes: `Returned to supplier on ${returnNumber}`,
+    });
+
+    return supplierReturn;
+  });
+
+  await recordAuditLog(session, {
+    action: "CREATE",
+    module: "SUPPLIER_RETURN",
+    recordId: created.id,
+    newValue: created,
+  });
+  return created;
+}
+
+// Cancelling puts the stock back and reverses the payable credit; the record is
+// kept so the history stays complete.
+export async function cancelSupplierReturn(session: AuthSession, returnId: string, reason: string) {
+  assertPermission(session, PERMISSIONS.PURCHASES_VOID);
+  if (!reason?.trim()) throw new ValidationError("A cancellation reason is required.");
+
+  const result = await prisma.$transaction(async (tx) => {
+    const existing = await tx.supplierReturn.findUnique({ where: { id: returnId } });
+    if (!existing) throw new NotFoundError("Supplier return not found.");
+    if (existing.status === "CANCELLED") throw new ValidationError("This supplier return is already cancelled.");
+
+    const batch = await tx.productBatch.findUniqueOrThrow({ where: { id: existing.batchId } });
+    const quantity = new Prisma.Decimal(existing.quantity);
+
+    await tx.productBatch.update({
+      where: { id: batch.id },
+      data: {
+        remainingQuantity: new Prisma.Decimal(batch.remainingQuantity).add(quantity),
+        quantityReturned: new Prisma.Decimal(batch.quantityReturned).sub(quantity),
+        status: batch.status === "FULLY_RETURNED" ? "ACTIVE" : batch.status,
+      },
+    });
+
+    await recordStockMovement(tx, {
+      productId: existing.productId,
+      batchId: batch.id,
+      movementType: "ADJUSTMENT",
+      quantity,
+      referenceType: "SUPPLIER_RETURN_CANCEL",
+      referenceId: existing.id,
+      userId: session.userId,
+      notes: `Supplier return ${existing.returnNumber} cancelled: ${reason}`,
+    });
+
+    return tx.supplierReturn.update({
+      where: { id: returnId },
+      data: { status: "CANCELLED", cancelReason: reason.trim() },
+    });
+  });
+
+  await recordAuditLog(session, {
+    action: "CANCEL",
+    module: "SUPPLIER_RETURN",
+    recordId: returnId,
+    newValue: { reason },
+  });
+  return result;
+}
+
+export async function listSupplierReturns(filters: { supplierId?: string; purchaseId?: string } = {}) {
+  return prisma.supplierReturn.findMany({
+    where: {
+      ...(filters.supplierId ? { supplierId: filters.supplierId } : {}),
+      ...(filters.purchaseId ? { purchaseId: filters.purchaseId } : {}),
+    },
+    include: { supplier: true, purchase: true, product: true, batch: true },
+    orderBy: { returnDate: "desc" },
+  });
+}
+
+// Accepts the internal id or the public return number (SR-000001).
+export async function getSupplierReturnDetails(idOrNumber: string) {
+  const key = (idOrNumber ?? "").trim();
+  if (!key) throw new NotFoundError("Supplier return not found.");
+  const record = await prisma.supplierReturn.findFirst({
+    where: { OR: [{ id: key }, { returnNumber: key }] },
+    include: { supplier: true, purchase: true, product: true, batch: true, createdBy: true },
+  });
+  if (!record) throw new NotFoundError("Supplier return not found.");
+
+  const received = new Prisma.Decimal(record.batch.quantityReceived);
+  const remaining = new Prisma.Decimal(record.batch.remainingQuantity);
+  const returned = new Prisma.Decimal(record.batch.quantityReturned);
+  return {
+    ...record,
+    quantityPurchased: received,
+    quantitySold: received.sub(remaining).sub(returned),
+    quantityReturnedTotal: returned,
+    quantityAvailable: remaining,
+  };
+}

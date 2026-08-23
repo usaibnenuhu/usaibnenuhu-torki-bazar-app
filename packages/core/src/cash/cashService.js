@@ -1,0 +1,201 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.createCashTransaction = createCashTransaction;
+exports.listCashTransactions = listCashTransactions;
+exports.getCashBalance = getCashBalance;
+exports.recordExpenseCashOutflow = recordExpenseCashOutflow;
+const database_1 = require("@torki-bazar/database");
+const shared_1 = require("@torki-bazar/shared");
+const context_1 = require("../context");
+const auditService_1 = require("../audit/auditService");
+/**
+ * Create a genuine manual cash transaction.
+ *
+ * Automatic cash entries created by saleService.ts
+ * are also stored in cashTransaction.
+ *
+ * Therefore cashTransaction is the SINGLE SOURCE OF TRUTH
+ * for Cash Management.
+ */
+async function createCashTransaction(session, input) {
+    (0, context_1.assertPermission)(session, shared_1.PERMISSIONS.EXPENSES_MANAGE);
+    if (input.amount <= 0) {
+        throw new shared_1.ValidationError("Cash transaction amount must be greater than zero.");
+    }
+    if (!["MANUAL_IN", "MANUAL_OUT"].includes(input.type)) {
+        throw new shared_1.ValidationError("Invalid cash transaction type.");
+    }
+    const transaction = await database_1.prisma.cashTransaction.create({
+        data: {
+            type: input.type,
+            amount: input.amount,
+            transactionDate: input.transactionDate ?? new Date(),
+            note: input.note,
+            createdById: session.userId,
+        },
+    });
+    await (0, auditService_1.recordAuditLog)(session, {
+        action: "CREATE",
+        module: "CASH_TRANSACTION",
+        recordId: transaction.id,
+        newValue: transaction,
+    });
+    return transaction;
+}
+/**
+ * Old versions of the application created automatic
+ * sale/payment rows in cashTransaction.
+ *
+ * Keep filtering these old rows so that historical
+ * duplicate/legacy data does not appear in Cash Management.
+ *
+ * Current saleService.ts entries such as:
+ *
+ *   Cash sale - TB-SALE-...
+ *   COD collection - TB-SALE-...
+ *   Credit payment - TB-SALE-...
+ *
+ * are REAL cashTransaction records and must NOT be filtered.
+ */
+function isLegacyAutomaticCashTransaction(note) {
+    const value = (note ?? "").trim();
+    if (!value) {
+        return false;
+    }
+    // Old format:
+    // Sale TB-SALE-...
+    if (/^Sale\s+TB-SALE-/i.test(value)) {
+        return true;
+    }
+    // Old format:
+    // COD collection - Sale TB-SALE-...
+    if (/^COD collection\s*-\s*Sale\s+TB-SALE-/i.test(value)) {
+        return true;
+    }
+    // Old format:
+    // Credit payment - Sale TB-SALE-...
+    if (/^Credit payment\s*-\s*Sale\s+TB-SALE-/i.test(value)) {
+        return true;
+    }
+    // Old generic automatic payment row.
+    if (/^Customer cash payment$/i.test(value)) {
+        return true;
+    }
+    return false;
+}
+/**
+ * List Cash Management transactions.
+ *
+ * IMPORTANT:
+ *
+ * We DO NOT query Sale and CustomerPayment here.
+ *
+ * saleService.ts already creates cashTransaction rows for:
+ *
+ *   CASH sale
+ *   COD collection
+ *   CREDIT payment
+ *
+ * If we also convert Sale/CustomerPayment into cash entries
+ * here, the same cash event appears twice.
+ *
+ * Therefore:
+ *
+ *       cashTransaction = SINGLE SOURCE OF TRUTH
+ */
+async function listCashTransactions(session, from, to) {
+    (0, context_1.assertPermission)(session, shared_1.PERMISSIONS.EXPENSES_MANAGE);
+    const transactions = await database_1.prisma.cashTransaction.findMany({
+        where: {
+            ...(from || to
+                ? {
+                    transactionDate: {
+                        ...(from ? { gte: from } : {}),
+                        ...(to ? { lte: to } : {}),
+                    },
+                }
+                : {}),
+        },
+        include: {
+            createdBy: true,
+        },
+        orderBy: [
+            {
+                transactionDate: "desc",
+            },
+            {
+                createdAt: "desc",
+            },
+        ],
+    });
+    /**
+     * Only remove OLD legacy automatic rows.
+     *
+     * Current automatic entries created by saleService.ts
+     * remain visible.
+     */
+    return transactions.filter((transaction) => !isLegacyAutomaticCashTransaction(transaction.note));
+}
+/**
+ * Calculate current cash balance.
+ *
+ * IMPORTANT:
+ *
+ * Do NOT calculate this from:
+ *
+ *   Sale
+ *   CustomerPayment
+ *
+ * because those records have already been converted into
+ * cashTransaction by saleService.ts.
+ *
+ * Calculating them again would double-count cash.
+ */
+async function getCashBalance(session) {
+    (0, context_1.assertPermission)(session, shared_1.PERMISSIONS.EXPENSES_MANAGE);
+    const transactions = await database_1.prisma.cashTransaction.findMany({
+        select: {
+            type: true,
+            amount: true,
+            note: true,
+        },
+    });
+    const balance = transactions.reduce((currentBalance, transaction) => {
+        /**
+         * Ignore old legacy automatic rows.
+         */
+        if (isLegacyAutomaticCashTransaction(transaction.note)) {
+            return currentBalance;
+        }
+        const amount = Number(transaction.amount);
+        if (transaction.type === "MANUAL_IN") {
+            return currentBalance + amount;
+        }
+        if (transaction.type === "MANUAL_OUT") {
+            return currentBalance - amount;
+        }
+        return currentBalance;
+    }, 0);
+    return balance;
+}
+/**
+ * Automatically record an expense cash outflow from inside database transactions.
+ */
+async function recordExpenseCashOutflow(tx, session, amount, expenseNumber, description, expenseDate) {
+    const transaction = await tx.cashTransaction.create({
+        data: {
+            type: "MANUAL_OUT",
+            amount: amount,
+            transactionDate: expenseDate ?? new Date(),
+            note: `Expense - ${expenseNumber}: ${description}`,
+            createdById: session.userId,
+        },
+    });
+    await (0, auditService_1.recordAuditLog)(session, {
+        action: "CREATE",
+        module: "CASH_TRANSACTION",
+        recordId: transaction.id,
+        newValue: transaction,
+    }, tx);
+    return transaction;
+}
