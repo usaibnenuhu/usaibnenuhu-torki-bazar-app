@@ -4,17 +4,6 @@ import {
   type InvoicePrefix,
 } from "@torki-bazar/shared";
 
-/**
- * Generate the next invoice/reference number safely.
- *
- * PostgreSQL advisory transaction locks make number generation
- * single-file for the same prefix/year, even when:
- *
- * - Online POS and Electron POS submit simultaneously
- * - multiple browser tabs submit simultaneously
- * - Railway has multiple API requests running concurrently
- * - InvoiceSequence is behind existing records
- */
 export async function nextInvoiceNumber(
   tx: typeof prisma,
   prefix: InvoicePrefix,
@@ -24,10 +13,10 @@ export async function nextInvoiceNumber(
   const year = withYear ? new Date().getFullYear() : 0;
 
   /*
-   * The database is the source of truth.
+   * PostgreSQL transaction-level lock.
    *
-   * Lock this prefix/year for the entire surrounding transaction so
-   * concurrent POS requests cannot receive the same number.
+   * Only one transaction can generate a number for the same
+   * prefix/year at a time.
    */
   await tx.$executeRaw`
     SELECT pg_advisory_xact_lock(
@@ -36,29 +25,48 @@ export async function nextInvoiceNumber(
   `;
 
   /*
-   * Synchronize InvoiceSequence with records that already exist.
+   * For SALES, determine the next number from the actual Sale table.
    *
-   * This is important because historical/synchronized records may exist
-   * even when InvoiceSequence was previously behind.
+   * InvoiceSequence may be behind because sales can have been created
+   * by another installation/database/synchronisation process.
    */
   if (
     prefix === INVOICE_PREFIXES.SALE ||
     prefix === INVOICE_PREFIXES.SALE_ONLINE ||
     prefix === INVOICE_PREFIXES.SALE_DESKTOP
   ) {
-    const rows = await tx.$queryRaw<{ max_number: number | null }[]>`
-      SELECT MAX(
-        CAST(
-          regexp_replace("saleNumber", '^.*-([0-9]+)$', '\\1')
-          AS INTEGER
-        )
-      ) AS max_number
-      FROM "Sale"
-      WHERE "saleNumber" LIKE ${`${prefix}-${year}-%`}
-    `;
+    const prefixPattern = `${prefix}-${year}-%`;
 
-    const existingMax = Number(rows[0]?.max_number ?? 0);
+    const latest = await tx.sale.findFirst({
+      where: {
+        saleNumber: {
+          startsWith: `${prefix}-${year}-`,
+        },
+      },
+      orderBy: {
+        saleNumber: "desc",
+      },
+      select: {
+        saleNumber: true,
+      },
+    });
 
+    let nextNumber = 1;
+
+    if (latest?.saleNumber) {
+      const match = latest.saleNumber.match(
+        new RegExp(`^${prefix}-${year}-(\\d+)$`)
+      );
+
+      if (match) {
+        nextNumber = Number(match[1]) + 1;
+      }
+    }
+
+    /*
+     * Keep InvoiceSequence synchronized with the database-authoritative
+     * Sale number.
+     */
     await tx.invoiceSequence.upsert({
       where: {
         prefix_year: {
@@ -67,34 +75,21 @@ export async function nextInvoiceNumber(
         },
       },
       update: {
-        lastNumber: {
-          set: existingMax,
-        },
+        lastNumber: nextNumber,
       },
       create: {
         prefix,
         year,
-        lastNumber: existingMax,
+        lastNumber: nextNumber,
       },
     });
 
-    const sequence = await tx.invoiceSequence.update({
-      where: {
-        prefix_year: {
-          prefix,
-          year,
-        },
-      },
-      data: {
-        lastNumber: {
-          increment: 1,
-        },
-      },
-    });
-
-    return `${prefix}-${year}-${String(sequence.lastNumber).padStart(6, "0")}`;
+    return `${prefix}-${year}-${String(nextNumber).padStart(6, "0")}`;
   }
 
+  /*
+   * All other invoice/reference numbers continue using InvoiceSequence.
+   */
   const sequence = await tx.invoiceSequence.upsert({
     where: {
       prefix_year: {
