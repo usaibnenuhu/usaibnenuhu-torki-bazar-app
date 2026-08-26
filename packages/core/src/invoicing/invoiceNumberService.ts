@@ -24,12 +24,10 @@ export async function nextInvoiceNumber(
   const year = withYear ? new Date().getFullYear() : 0;
 
   /*
-   * IMPORTANT:
-   * Hold a PostgreSQL transaction-level advisory lock for this
-   * exact prefix/year until the surrounding Prisma transaction ends.
+   * The database is the source of truth.
    *
-   * hashtextextended() converts the prefix/year into a stable bigint
-   * lock key. Different prefixes can operate independently.
+   * Lock this prefix/year for the entire surrounding transaction so
+   * concurrent POS requests cannot receive the same number.
    */
   await tx.$executeRaw`
     SELECT pg_advisory_xact_lock(
@@ -38,10 +36,65 @@ export async function nextInvoiceNumber(
   `;
 
   /*
-   * Now that this prefix/year is locked, no other transaction can
-   * generate a number for the same prefix/year until this transaction
-   * finishes.
+   * Synchronize InvoiceSequence with records that already exist.
+   *
+   * This is important because historical/synchronized records may exist
+   * even when InvoiceSequence was previously behind.
    */
+  if (
+    prefix === INVOICE_PREFIXES.SALE ||
+    prefix === INVOICE_PREFIXES.SALE_ONLINE ||
+    prefix === INVOICE_PREFIXES.SALE_DESKTOP
+  ) {
+    const rows = await tx.$queryRaw<{ max_number: number | null }[]>`
+      SELECT MAX(
+        CAST(
+          regexp_replace("saleNumber", '^.*-([0-9]+)$', '\\1')
+          AS INTEGER
+        )
+      ) AS max_number
+      FROM "Sale"
+      WHERE "saleNumber" LIKE ${`${prefix}-${year}-%`}
+    `;
+
+    const existingMax = Number(rows[0]?.max_number ?? 0);
+
+    await tx.invoiceSequence.upsert({
+      where: {
+        prefix_year: {
+          prefix,
+          year,
+        },
+      },
+      update: {
+        lastNumber: {
+          set: existingMax,
+        },
+      },
+      create: {
+        prefix,
+        year,
+        lastNumber: existingMax,
+      },
+    });
+
+    const sequence = await tx.invoiceSequence.update({
+      where: {
+        prefix_year: {
+          prefix,
+          year,
+        },
+      },
+      data: {
+        lastNumber: {
+          increment: 1,
+        },
+      },
+    });
+
+    return `${prefix}-${year}-${String(sequence.lastNumber).padStart(6, "0")}`;
+  }
+
   const sequence = await tx.invoiceSequence.upsert({
     where: {
       prefix_year: {
@@ -61,96 +114,7 @@ export async function nextInvoiceNumber(
     },
   });
 
-  let number = sequence.lastNumber;
-
-  /*
-   * SALES
-   *
-   * Never return a sale number that already exists.
-   *
-   * This also handles databases where InvoiceSequence was behind
-   * because records were imported/synchronized previously.
-   */
-  if (
-    prefix === INVOICE_PREFIXES.SALE ||
-    prefix === INVOICE_PREFIXES.SALE_ONLINE ||
-    prefix === INVOICE_PREFIXES.SALE_DESKTOP
-  ) {
-    while (true) {
-      const candidate =
-        `${prefix}-${year}-${String(number).padStart(6, "0")}`;
-
-      const existingSale = await tx.sale.findUnique({
-        where: {
-          saleNumber: candidate,
-        },
-        select: {
-          id: true,
-        },
-      });
-
-      if (!existingSale) {
-        break;
-      }
-
-      number += 1;
-
-      await tx.invoiceSequence.update({
-        where: {
-          prefix_year: {
-            prefix,
-            year,
-          },
-        },
-        data: {
-          lastNumber: number,
-        },
-      });
-    }
-  }
-
-  /*
-   * Supplier payments do not use a year.
-   */
-  if (
-    prefix === INVOICE_PREFIXES.SUPPLIER_PAYMENT &&
-    !withYear
-  ) {
-    while (true) {
-      const candidate =
-        `${prefix}-${String(number).padStart(6, "0")}`;
-
-      const existingPayment =
-        await tx.supplierPayment.findUnique({
-          where: {
-            paymentNumber: candidate,
-          },
-          select: {
-            id: true,
-          },
-        });
-
-      if (!existingPayment) {
-        break;
-      }
-
-      number += 1;
-
-      await tx.invoiceSequence.update({
-        where: {
-          prefix_year: {
-            prefix,
-            year,
-          },
-        },
-        data: {
-          lastNumber: number,
-        },
-      });
-    }
-  }
-
-  const padded = String(number).padStart(6, "0");
+  const padded = String(sequence.lastNumber).padStart(6, "0");
 
   return withYear
     ? `${prefix}-${year}-${padded}`
