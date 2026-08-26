@@ -13,61 +13,32 @@ export async function nextInvoiceNumber(
   const year = withYear ? new Date().getFullYear() : 0;
 
   /*
-   * PostgreSQL transaction-level lock.
-   *
-   * Only one transaction can generate a number for the same
-   * prefix/year at a time.
+   * PostgreSQL: serialize concurrent sequence generation.
+   * SQLite/Electron: this call is unsupported, so continue and let
+   * SQLite transaction locking provide serialization.
    */
-  await tx.$executeRaw`
-    SELECT pg_advisory_xact_lock(
-      hashtextextended(${`${prefix}:${year}`}, 0)
-    )
-  `;
+  try {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${`${prefix}:${year}`}, 0)
+      )
+    `;
+  } catch {
+    // SQLite/Electron does not support PostgreSQL advisory locks.
+  }
 
   /*
-   * For SALES, determine the next number from the actual Sale table.
+   * Sales use InvoiceSequence directly.
    *
-   * InvoiceSequence may be behind because sales can have been created
-   * by another installation/database/synchronisation process.
+   * ONLINE and DESKTOP have different prefixes, so numbers generated
+   * independently by Neon and Electron cannot collide.
    */
   if (
     prefix === INVOICE_PREFIXES.SALE ||
     prefix === INVOICE_PREFIXES.SALE_ONLINE ||
     prefix === INVOICE_PREFIXES.SALE_DESKTOP
   ) {
-    const prefixPattern = `${prefix}-${year}-%`;
-
-    const latest = await tx.sale.findFirst({
-      where: {
-        saleNumber: {
-          startsWith: `${prefix}-${year}-`,
-        },
-      },
-      orderBy: {
-        saleNumber: "desc",
-      },
-      select: {
-        saleNumber: true,
-      },
-    });
-
-    let nextNumber = 1;
-
-    if (latest?.saleNumber) {
-      const match = latest.saleNumber.match(
-        new RegExp(`^${prefix}-${year}-(\\d+)$`)
-      );
-
-      if (match) {
-        nextNumber = Number(match[1]) + 1;
-      }
-    }
-
-    /*
-     * Keep InvoiceSequence synchronized with the database-authoritative
-     * Sale number.
-     */
-    await tx.invoiceSequence.upsert({
+    const sequence = await tx.invoiceSequence.upsert({
       where: {
         prefix_year: {
           prefix,
@@ -75,20 +46,24 @@ export async function nextInvoiceNumber(
         },
       },
       update: {
-        lastNumber: nextNumber,
+        lastNumber: {
+          increment: 1,
+        },
       },
       create: {
         prefix,
         year,
-        lastNumber: nextNumber,
+        lastNumber: 1,
       },
     });
 
-    return `${prefix}-${year}-${String(nextNumber).padStart(6, "0")}`;
+    const padded = String(sequence.lastNumber).padStart(6, "0");
+
+    return `${prefix}-${year}-${padded}`;
   }
 
   /*
-   * All other invoice/reference numbers continue using InvoiceSequence.
+   * All other invoice/reference numbers.
    */
   const sequence = await tx.invoiceSequence.upsert({
     where: {

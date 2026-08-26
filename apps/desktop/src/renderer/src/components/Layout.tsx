@@ -114,16 +114,25 @@ export function Layout() {
 
     try {
       const result = await call<{
+        pulled?: number;
         synced: number;
         failed: number;
         pending: number;
+        error?: string | null;
       }>("sync:run");
 
       const status = await call<SyncStatus>("sync:status");
 
       setSyncStatus(status);
 
-      if (result.failed > 0) {
+      if (result.error) {
+        console.error("NEON -> ELECTRON:", result.error);
+
+        push(
+          `Neon → Electron failed: ${result.error}`,
+          "error"
+        );
+      } else if (result.failed > 0) {
         push(
           `Sync completed with ${result.failed} failed change(s).`,
           "error"
@@ -147,8 +156,15 @@ export function Layout() {
     } catch (error) {
       console.error("Sync failed:", error);
 
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      console.error("SYNC ERROR:", message);
+
       push(
-        "Unable to sync changes.",
+        `Sync failed: ${message}`,
         "error"
       );
     } finally {

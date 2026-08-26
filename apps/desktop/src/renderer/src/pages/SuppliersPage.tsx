@@ -275,6 +275,8 @@ export function SuppliersPage() {
     paymentDate: "",
   });
 
+  const [paymentIdempotencyKey, setPaymentIdempotencyKey] = useState("");
+
   const [saving, setSaving] = useState(false);
 
   const [search, setSearch] = useState("");
@@ -456,6 +458,7 @@ export function SuppliersPage() {
       paymentDate: "",
     });
 
+    setPaymentIdempotencyKey(crypto.randomUUID());
     setPayTarget(supplier);
   }
 
@@ -486,6 +489,7 @@ export function SuppliersPage() {
         supplierId: payTarget.id,
         amount,
         method: payForm.method,
+        idempotencyKey: paymentIdempotencyKey,
         reference: payForm.reference || undefined,
         notes: payForm.notes || undefined,
         paymentDate: payForm.paymentDate || undefined,

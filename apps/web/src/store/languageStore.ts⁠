@@ -1,0 +1,120 @@
+import { create } from "zustand";
+
+type Lang = "en" | "bn";
+
+interface LanguageStore {
+  lang: Lang;
+  setLang: (lang: Lang) => void;
+  toggleLang: () => void;
+  t: (key: string) => string;
+  n: (num: number | string) => string;
+}
+
+const translations: Record<Lang, Record<string, string>> = {
+  en: {
+    dashboard: "Dashboard",
+    pos: "POS",
+    sales: "Sales",
+    products: "Products",
+    categories: "Categories",
+    inventory: "Inventory",
+    suppliers: "Suppliers",
+    supplierReturns: "Supplier Returns",
+    purchases: "Purchases",
+    customers: "Customers",
+    membership: "Membership",
+    returns: "Returns",
+    employees: "Employees",
+    expenses: "Expenses",
+    reports: "Reports",
+    notifications: "Notifications",
+    settings: "Settings & Backup",
+    // Dashboard translations
+    welcomeBack: "Welcome back, Torki Bazar",
+    liveOperations: "Real-time performance metrics, inventory health, and revenue analytics — refined for the day ahead.",
+    coreRevenue: "Sales & Profit Overview (Today)",
+    totalRevenue: "TOTAL REVENUE / SALES",
+    accumulatedToday: "Accumulated for today",
+    verifiedPos: "Verified POS transactions",
+    grossProfitMargin: "GROSS PROFIT MARGIN",
+    netReturn: "Net return after deducting COGS",
+    grossProfitYield: "GROSS PROFIT YIELD",
+    cogs: "COGS",
+    expensesLabel: "EXPENSES",
+    supplierPayables: "SUPPLIER PAYABLES",
+    customerReceivables: "CUSTOMER RECEIVABLES",
+    codPending: "COD PENDING",
+    inventoryExpenses: "INVENTORY EXPENSES",
+    attentionRequired: "Attention Required",
+    lowStockWarning: "Low Stock Warning",
+    expiringSoon: "Expiring Soon",
+    expiredBatches: "Expired Batches",
+    operationalStatus: "Operational Status",
+    totalCustomers: "TOTAL CUSTOMERS",
+    activeMembers: "ACTIVE MEMBERS",
+    activeSuppliers: "ACTIVE SUPPLIERS",
+  },
+  bn: {
+    dashboard: "ড্যাশবোর্ড",
+    pos: "পিওএস",
+    sales: "বিক্রয়",
+    products: "পণ্য",
+    categories: "ক্যাটেগরি",
+    inventory: "ইনভেন্টরি",
+    suppliers: "সরবরাহকারী",
+    supplierReturns: "সরবরাহকারী ফেরত",
+    purchases: "ক্রয়",
+    customers: "গ্রাহক",
+    membership: "সদস্যপদ",
+    returns: "ফেরত",
+    employees: "কর্মচারী",
+    expenses: "খরচ",
+    reports: "রিপোর্ট",
+    notifications: "নোটিফিকেশন",
+    settings: "সেটিংস ও ব্যাকআপ",
+    // Dashboard translations
+    welcomeBack: "স্বাগতম, তর্কি বাজার",
+    liveOperations: "রিয়েল-টাইম পারফরম্যান্স মেট্রিক্স, ইনভেন্টরি স্বাস্থ্য এবং রেভিনিউ অ্যানালিটিক্স।",
+    coreRevenue: "বিক্রয় ও লাভ ওভারভিউ (আজ)",
+    totalRevenue: "মোট রেভিনিউ / বিক্রয়",
+    accumulatedToday: "আজকের জন্য জমা হয়েছে",
+    verifiedPos: "যাচাইকৃত পিওএস লেনদেন",
+    grossProfitMargin: "মোট লাভ মার্জিন",
+    netReturn: "সিওজিএস বাদ দেওয়ার পর নিট রিটার্ন",
+    grossProfitYield: "মোট লাভ ফলন",
+    cogs: "সিওজিএস",
+    expensesLabel: "খরচ",
+    supplierPayables: "সরবরাহকারী পাওনা",
+    customerReceivables: "গ্রাহক পাওনা",
+    codPending: "সিওডি অপেক্ষমাণ",
+    inventoryExpenses: "ইনভেন্টরি খরচ",
+    attentionRequired: "توجه প্রয়োজন",
+    lowStockWarning: "কম স্টক সতর্কতা",
+    expiringSoon: "শীघ्र মেয়াদোত্তীর্ণ হবে",
+    expiredBatches: "মেয়াদোত্তীর্ণ ব্যাচ",
+    operationalStatus: "অপারেটিং স্ট্যাটাস",
+    totalCustomers: "মোট গ্রাহক",
+    activeMembers: "সক্রিয় সদস্য",
+    activeSuppliers: "সক্রিয় সরবরাহকারী",
+  },
+};
+
+const bnDigits: Record<string, string> = {
+  "0": "০", "1": "১", "2": "২", "3": "৩", "4": "৪",
+  "5": "৫", "6": "৬", "7": "৭", "8": "৮", "9": "৯"
+};
+
+export const useLanguageStore = create<LanguageStore>((set, get) => ({
+  lang: "en",
+  setLang: (lang) => set({ lang }),
+  toggleLang: () => set({ lang: get().lang === "en" ? "bn" : "en" }),
+  t: (key) => {
+    const currentLang = get().lang;
+    return translations[currentLang]?.[key] || key;
+  },
+  n: (num) => {
+    const str = String(num);
+    if (get().lang !== "bn") return str;
+    return str.replace(/[0-9]/g, (digit) => bnDigits[digit] || digit);
+  },
+}));

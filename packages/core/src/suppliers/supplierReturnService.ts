@@ -8,6 +8,7 @@ import {
 import type { AuthSession } from "../context";
 import { assertPermission } from "../context";
 import { recordAuditLog } from "../audit/auditService";
+import { enqueueSync } from "../sync/syncService";
 import { nextInvoiceNumber } from "../invoicing/invoiceNumberService";
 import { recordStockMovement } from "../inventory/inventoryService";
 import { recordBkashSaleInflow } from "../bKash/bkashService";
@@ -215,6 +216,14 @@ export async function createSupplierReturn(
           createdById: session.userId,
         },
       });
+
+    await enqueueSync(
+      "SUPPLIER_RETURN",
+      supplierReturn.id,
+      "CREATE",
+      supplierReturn,
+      tx
+    );
 
     /*
      * ============================================================
@@ -448,15 +457,26 @@ export async function cancelSupplierReturn(
      * ============================================================
      */
 
-    return tx.supplierReturn.update({
-      where: {
-        id: returnId,
-      },
-      data: {
-        status: "CANCELLED",
-        cancelReason: reason.trim(),
-      },
-    });
+    const cancelledReturn =
+      await tx.supplierReturn.update({
+        where: {
+          id: returnId,
+        },
+        data: {
+          status: "CANCELLED",
+          cancelReason: reason.trim(),
+        },
+      });
+
+    await enqueueSync(
+      "SUPPLIER_RETURN",
+      cancelledReturn.id,
+      "UPDATE",
+      cancelledReturn,
+      tx
+    );
+
+    return cancelledReturn;
   });
 
   await recordAuditLog(session, {

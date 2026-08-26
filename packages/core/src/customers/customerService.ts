@@ -3,6 +3,7 @@ import { PERMISSIONS, NotFoundError, ValidationError } from "@torki-bazar/shared
 import type { AuthSession } from "../context";
 import { assertPermission } from "../context";
 import { recordAuditLog } from "../audit/auditService";
+import { enqueueSync } from "../sync/syncService";
 
 export async function listCustomers(includeArchived = false) {
   const customers = await prisma.customer.findMany({
@@ -67,6 +68,19 @@ export async function createCustomer(
 ) {
   assertPermission(session, PERMISSIONS.CUSTOMERS_MANAGE);
   const customer = await prisma.customer.create({ data: input });
+
+  await enqueueSync(
+    "CUSTOMER",
+    customer.id,
+    "CREATE",
+    {
+      name: customer.name,
+      phone: customer.phone,
+      address: customer.address,
+      status: customer.status,
+    }
+  );
+
   await recordAuditLog(session, { action: "CREATE", module: "CUSTOMER", recordId: customer.id, newValue: customer });
   return customer;
 }
@@ -80,13 +94,42 @@ export async function updateCustomer(
   const before = await prisma.customer.findUnique({ where: { id } });
   if (!before) throw new NotFoundError("Customer not found.");
   const customer = await prisma.customer.update({ where: { id }, data: input });
+
+  await enqueueSync(
+    "CUSTOMER",
+    customer.id,
+    "UPDATE",
+    {
+      name: customer.name,
+      phone: customer.phone,
+      address: customer.address,
+      status: customer.status,
+    }
+  );
+
   await recordAuditLog(session, { action: "UPDATE", module: "CUSTOMER", recordId: id, previousValue: before, newValue: customer });
   return customer;
 }
 
 export async function archiveCustomer(session: AuthSession, id: string, isArchived = true) {
   assertPermission(session, PERMISSIONS.CUSTOMERS_MANAGE);
-  const customer = await prisma.customer.update({ where: { id }, data: { status: isArchived ? "ARCHIVED" : "ACTIVE" } });
+  const customer = await prisma.customer.update({
+    where: { id },
+    data: { status: isArchived ? "ARCHIVED" : "ACTIVE" },
+  });
+
+  await enqueueSync(
+    "CUSTOMER",
+    customer.id,
+    "UPDATE",
+    {
+      name: customer.name,
+      phone: customer.phone,
+      address: customer.address,
+      status: customer.status,
+    }
+  );
+
   await recordAuditLog(session, { action: isArchived ? "ARCHIVE" : "UNARCHIVE", module: "CUSTOMER", recordId: id });
   return customer;
 }
@@ -108,6 +151,21 @@ export async function recordCustomerPayment(
       createdById: session.userId,
     },
   });
+
+  await enqueueSync(
+    "CUSTOMER_PAYMENT",
+    payment.id,
+    "CREATE",
+    {
+      customerId: payment.customerId,
+      saleId: payment.saleId,
+      amount: payment.amount,
+      method: payment.method,
+      reference: payment.reference,
+      createdById: payment.createdById,
+    }
+  );
+
   await recordAuditLog(session, { action: "CREATE", module: "CUSTOMER_PAYMENT", recordId: payment.id, newValue: payment });
   return payment;
 }

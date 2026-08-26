@@ -71,6 +71,92 @@ export async function enqueueSync(
   });
 }
 
+
+async function syncCustomer(customerId: string) {
+  const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+  if (!customer) throw new Error(`Customer ${customerId} not found locally.`);
+
+  let existing = await neonPrisma.customer.findUnique({ where: { id: customer.id } });
+  if (!existing && customer.phone) {
+    existing = await neonPrisma.customer.findFirst({ where: { phone: customer.phone } });
+  }
+
+  if (existing) {
+    await neonPrisma.customer.update({
+      where: { id: existing.id },
+      data: {
+        name: customer.name,
+        phone: customer.phone,
+        address: customer.address,
+        status: customer.status,
+        updatedAt: customer.updatedAt,
+      },
+    });
+    return existing.id;
+  }
+
+  const created = await neonPrisma.customer.create({
+    data: {
+      id: customer.id,
+      name: customer.name,
+      phone: customer.phone,
+      address: customer.address,
+      status: customer.status,
+      createdAt: customer.createdAt,
+      updatedAt: customer.updatedAt,
+    },
+  });
+
+  return created.id;
+}
+
+
+async function syncSupplier(supplierId: string) {
+  const supplier = await prisma.supplier.findUnique({
+    where: { id: supplierId },
+  });
+
+  if (!supplier) {
+    throw new Error(`Supplier ${supplierId} not found locally.`);
+  }
+
+  const existing = await neonPrisma.supplier.findUnique({
+    where: { id: supplier.id },
+  });
+
+  if (existing) {
+    await neonPrisma.supplier.update({
+      where: { id: existing.id },
+      data: {
+        name: supplier.name,
+        company: supplier.company,
+        phone: supplier.phone,
+        email: supplier.email,
+        address: supplier.address,
+        notes: supplier.notes,
+        status: supplier.status,
+        updatedAt: supplier.updatedAt,
+      },
+    });
+    return;
+  }
+
+  await neonPrisma.supplier.create({
+    data: {
+      id: supplier.id,
+      name: supplier.name,
+      company: supplier.company,
+      phone: supplier.phone,
+      email: supplier.email,
+      address: supplier.address,
+      notes: supplier.notes,
+      status: supplier.status,
+      createdAt: supplier.createdAt,
+      updatedAt: supplier.updatedAt,
+    },
+  });
+}
+
 async function syncProduct(productId: string) {
   const product = await prisma.product.findUnique({
     where: { id: productId },
@@ -330,10 +416,72 @@ async function syncProduct(productId: string) {
   // PRODUCT
   // ------------------------------------------------------------
 
-  await neonPrisma.product.upsert({
+  /*
+   * Local and Neon product IDs may be different.
+   *
+   * Resolve the existing Neon product using the strongest available
+   * business identity first:
+   *   1. SKU
+   *   2. Barcode
+   *   3. Local ID
+   *
+   * This prevents duplicate products when the local PC and Neon
+   * databases were created independently.
+   */
+  let neonProduct = await neonPrisma.product.findUnique({
     where: { id: product.id },
+  });
 
-    create: {
+  if (!neonProduct && product.sku) {
+    neonProduct = await neonPrisma.product.findUnique({
+      where: { sku: product.sku },
+    });
+  }
+
+  if (!neonProduct && product.barcode) {
+    neonProduct = await neonPrisma.product.findUnique({
+      where: { barcode: product.barcode },
+    });
+  }
+
+  if (neonProduct) {
+    await neonPrisma.product.update({
+      where: { id: neonProduct.id },
+
+      data: {
+        name: product.name,
+        imageUrl: product.imageUrl,
+
+        categoryId: neonCategoryId,
+        subcategoryId: neonSubcategoryId,
+        brandId: neonBrandId,
+
+        sku: product.sku,
+        barcode: product.barcode,
+
+        unitId: neonUnitId,
+
+        packSize: product.packSize,
+        expiryDate: product.expiryDate,
+        purchasePrice: product.purchasePrice,
+        sellingPrice: product.sellingPrice,
+        wholesalePrice: product.wholesalePrice,
+        minimumStock: product.minimumStock,
+        currentStock: product.currentStock,
+        description: product.description,
+        status: product.status,
+
+        defaultSupplierId: neonDefaultSupplierId,
+
+        updatedAt: product.updatedAt,
+      },
+    });
+
+    return;
+  }
+
+  await neonPrisma.product.create({
+    data: {
       id: product.id,
       name: product.name,
       imageUrl: product.imageUrl,
@@ -360,34 +508,6 @@ async function syncProduct(productId: string) {
       defaultSupplierId: neonDefaultSupplierId,
 
       createdAt: product.createdAt,
-      updatedAt: product.updatedAt,
-    },
-
-    update: {
-      name: product.name,
-      imageUrl: product.imageUrl,
-
-      categoryId: neonCategoryId,
-      subcategoryId: neonSubcategoryId,
-      brandId: neonBrandId,
-
-      sku: product.sku,
-      barcode: product.barcode,
-
-      unitId: neonUnitId,
-
-      packSize: product.packSize,
-      expiryDate: product.expiryDate,
-      purchasePrice: product.purchasePrice,
-      sellingPrice: product.sellingPrice,
-      wholesalePrice: product.wholesalePrice,
-      minimumStock: product.minimumStock,
-      currentStock: product.currentStock,
-      description: product.description,
-      status: product.status,
-
-      defaultSupplierId: neonDefaultSupplierId,
-
       updatedAt: product.updatedAt,
     },
   });
@@ -565,6 +685,9 @@ async function ensureNeonPurchase(
 ): Promise<string> {
   const purchase = await prisma.purchase.findUnique({
     where: { id: purchaseId },
+    include: {
+      items: true,
+    },
   });
 
   if (!purchase) {
@@ -634,6 +757,196 @@ async function ensureNeonPurchase(
   });
 
   return created.id;
+}
+
+async function syncPurchase(purchaseId: string) {
+  await ensureNeonPurchase(purchaseId);
+  await syncPurchaseItems(purchaseId);
+}
+
+async function syncPurchaseItems(purchaseId: string) {
+  const purchase = await prisma.purchase.findUnique({
+    where: { id: purchaseId },
+    include: { items: true },
+  });
+
+  if (!purchase) {
+    throw new Error(`Purchase ${purchaseId} not found locally.`);
+  }
+
+  // IMPORTANT:
+  // Local and Neon purchase IDs may differ.
+  // Always resolve the actual Neon purchase ID before
+  // syncing PurchaseItems.
+  const neonPurchaseId = await ensureNeonPurchase(purchase.id);
+
+  for (const item of purchase.items) {
+    await syncProduct(item.productId);
+
+    let neonBatchId: string | null = null;
+
+    if (item.batchId) {
+      // The purchase item references this batch, so make sure
+      // the batch exists in Neon before creating/updating the item.
+      await syncProductBatch(item.batchId);
+
+      const neonBatch = await neonPrisma.productBatch.findUnique({
+        where: { id: item.batchId },
+        select: { id: true },
+      });
+
+      neonBatchId = neonBatch?.id ?? null;
+    }
+
+    await neonPrisma.purchaseItem.upsert({
+      where: { id: item.id },
+      create: {
+        id: item.id,
+        purchaseId: neonPurchaseId,
+        productId: item.productId,
+        batchId: neonBatchId,
+        quantity: item.quantity,
+        unitCost: item.unitCost,
+        total: item.total,
+      },
+      update: {
+        purchaseId: neonPurchaseId,
+        productId: item.productId,
+        batchId: neonBatchId,
+        quantity: item.quantity,
+        unitCost: item.unitCost,
+        total: item.total,
+      },
+    });
+  }
+}
+
+async function syncSupplierPayment(paymentId: string) {
+  const payment = await prisma.supplierPayment.findUnique({
+    where: { id: paymentId },
+  });
+
+  if (!payment) {
+    throw new Error(`SupplierPayment ${paymentId} not found locally.`);
+  }
+
+  const neonSupplierId = await ensureNeonSupplier(payment.supplierId);
+  const neonCreatedById = await ensureNeonUser(payment.createdById);
+
+  let neonPurchaseId: string | null = null;
+
+  if (payment.purchaseId) {
+    neonPurchaseId = await ensureNeonPurchase(payment.purchaseId);
+  }
+
+  await neonPrisma.supplierPayment.upsert({
+    where: { id: payment.id },
+
+    create: {
+      id: payment.id,
+      paymentNumber: payment.paymentNumber,
+      supplierId: neonSupplierId,
+      purchaseId: neonPurchaseId,
+      amount: payment.amount,
+      paymentDate: payment.paymentDate,
+      method: payment.method,
+      reference: payment.reference,
+      notes: payment.notes,
+      previousOutstanding: payment.previousOutstanding,
+      remainingOutstanding: payment.remainingOutstanding,
+      createdById: neonCreatedById,
+      createdAt: payment.createdAt,
+    },
+
+    update: {
+      paymentNumber: payment.paymentNumber,
+      supplierId: neonSupplierId,
+      purchaseId: neonPurchaseId,
+      amount: payment.amount,
+      paymentDate: payment.paymentDate,
+      method: payment.method,
+      reference: payment.reference,
+      notes: payment.notes,
+      previousOutstanding: payment.previousOutstanding,
+      remainingOutstanding: payment.remainingOutstanding,
+      createdById: neonCreatedById,
+      createdAt: payment.createdAt,
+    },
+  });
+}
+
+async function syncSupplierReturn(returnId: string) {
+  const supplierReturn = await prisma.supplierReturn.findUnique({
+    where: { id: returnId },
+  });
+
+  if (!supplierReturn) {
+    throw new Error(
+      `SupplierReturn ${returnId} not found locally.`
+    );
+  }
+
+  const neonSupplierId = await ensureNeonSupplier(
+    supplierReturn.supplierId
+  );
+
+  const neonPurchaseId = await ensureNeonPurchase(
+    supplierReturn.purchaseId
+  );
+
+  await syncProduct(supplierReturn.productId);
+  await syncProductBatch(supplierReturn.batchId);
+
+  const neonCreatedById = await ensureNeonUser(
+    supplierReturn.createdById
+  );
+
+  await neonPrisma.supplierReturn.upsert({
+    where: {
+      id: supplierReturn.id,
+    },
+
+    create: {
+      id: supplierReturn.id,
+      returnNumber: supplierReturn.returnNumber,
+      supplierId: neonSupplierId,
+      purchaseId: neonPurchaseId,
+      productId: supplierReturn.productId,
+      batchId: supplierReturn.batchId,
+      quantity: supplierReturn.quantity,
+      unitCost: supplierReturn.unitCost,
+      returnValue: supplierReturn.returnValue,
+      returnDate: supplierReturn.returnDate,
+      reason: supplierReturn.reason,
+      notes: supplierReturn.notes,
+      settlementType: supplierReturn.settlementType,
+      status: supplierReturn.status,
+      cancelReason: supplierReturn.cancelReason,
+      createdById: neonCreatedById,
+      createdAt: supplierReturn.createdAt,
+      updatedAt: supplierReturn.updatedAt,
+    },
+
+    update: {
+      returnNumber: supplierReturn.returnNumber,
+      supplierId: neonSupplierId,
+      purchaseId: neonPurchaseId,
+      productId: supplierReturn.productId,
+      batchId: supplierReturn.batchId,
+      quantity: supplierReturn.quantity,
+      unitCost: supplierReturn.unitCost,
+      returnValue: supplierReturn.returnValue,
+      returnDate: supplierReturn.returnDate,
+      reason: supplierReturn.reason,
+      notes: supplierReturn.notes,
+      settlementType: supplierReturn.settlementType,
+      status: supplierReturn.status,
+      cancelReason: supplierReturn.cancelReason,
+      createdById: neonCreatedById,
+      createdAt: supplierReturn.createdAt,
+      updatedAt: supplierReturn.updatedAt,
+    },
+  });
 }
 
 async function syncProductBatch(batchId: string) {
@@ -765,14 +1078,278 @@ async function syncStockMovement(movementId: string) {
   });
 }
 
+async function syncBkashTransaction(transactionId: string) {
+  const transaction = await prisma.bkashTransaction.findUnique({
+    where: { id: transactionId },
+  });
+
+  if (!transaction) {
+    throw new Error(
+      `BkashTransaction ${transactionId} not found locally.`
+    );
+  }
+
+  const neonCreatedById = await ensureNeonUser(
+    transaction.createdById
+  );
+
+  await neonPrisma.bkashTransaction.upsert({
+    where: { id: transaction.id },
+
+    create: {
+      id: transaction.id,
+      type: transaction.type,
+      amount: transaction.amount,
+      transactionDate: transaction.transactionDate,
+      note: transaction.note,
+      createdById: neonCreatedById,
+      createdAt: transaction.createdAt,
+      updatedAt: transaction.updatedAt,
+    },
+
+    update: {
+      type: transaction.type,
+      amount: transaction.amount,
+      transactionDate: transaction.transactionDate,
+      note: transaction.note,
+      createdById: neonCreatedById,
+      createdAt: transaction.createdAt,
+      updatedAt: transaction.updatedAt,
+    },
+  });
+}
+
+async function syncCashTransaction(transactionId: string) {
+  const transaction = await prisma.cashTransaction.findUnique({
+    where: { id: transactionId },
+  });
+
+  if (!transaction) {
+    throw new Error(
+      `CashTransaction ${transactionId} not found locally.`
+    );
+  }
+
+  const neonCreatedById = await ensureNeonUser(
+    transaction.createdById
+  );
+
+  await neonPrisma.cashTransaction.upsert({
+    where: { id: transaction.id },
+
+    create: {
+      id: transaction.id,
+      type: transaction.type,
+      amount: transaction.amount,
+      transactionDate: transaction.transactionDate,
+      note: transaction.note,
+      createdById: neonCreatedById,
+      createdAt: transaction.createdAt,
+    },
+
+    update: {
+      type: transaction.type,
+      amount: transaction.amount,
+      transactionDate: transaction.transactionDate,
+      note: transaction.note,
+      createdById: neonCreatedById,
+      createdAt: transaction.createdAt,
+    },
+  });
+}
+
+    
+/**
+ * Push one local Sale from Electron -> Neon.
+ *
+ * Sales may have been created locally before SALE synchronization
+ * existed, so this function is deliberately idempotent.
+ */
+async function syncSale(saleId: string) {
+  const sale = await prisma.sale.findUnique({
+    where: { id: saleId },
+    include: {
+      items: { include: { batchConsumptions: true } },
+      customerPayments: true,
+    },
+  });
+
+  if (!sale) throw new Error(`Sale ${saleId} not found locally.`);
+
+  const neonCreatedById = await ensureNeonUser(sale.createdById);
+
+  let neonCustomerId: string | null = null;
+  if (sale.customerId) {
+    neonCustomerId = await syncCustomer(sale.customerId);
+  }
+
+  const neonProductIds = new Map<string, string>();
+  for (const item of sale.items) {
+    await syncProduct(item.productId);
+    const localProduct = await prisma.product.findUnique({ where: { id: item.productId } });
+    if (!localProduct) throw new Error(`Product ${item.productId} not found locally.`);
+    let neonProduct = await neonPrisma.product.findUnique({ where: { id: localProduct.id } });
+    if (!neonProduct && localProduct.sku) {
+      neonProduct = await neonPrisma.product.findUnique({ where: { sku: localProduct.sku } });
+    }
+    if (!neonProduct && localProduct.barcode) {
+      neonProduct = await neonPrisma.product.findUnique({ where: { barcode: localProduct.barcode } });
+    }
+    if (!neonProduct) throw new Error(`Product ${localProduct.name} could not be mapped to Neon.`);
+    neonProductIds.set(localProduct.id, neonProduct.id);
+  }
+
+  let existing = await neonPrisma.sale.findUnique({ where: { id: sale.id } });
+  if (!existing) existing = await neonPrisma.sale.findUnique({ where: { saleNumber: sale.saleNumber } });
+
+  const saleData = {
+    saleNumber: sale.saleNumber,
+    customerId: neonCustomerId,
+    saleDate: sale.saleDate,
+    subtotal: sale.subtotal,
+    discount: sale.discount,
+    totalAmount: sale.totalAmount,
+    cogsAmount: sale.cogsAmount,
+    paymentMethod: sale.paymentMethod,
+    paymentStatus: sale.paymentStatus,
+    status: sale.status,
+    voidReason: sale.voidReason,
+    codCollectedAt: sale.codCollectedAt,
+    codCollectedById: sale.codCollectedById ? await ensureNeonUser(sale.codCollectedById) : null,
+    onlineOrderNumber: sale.onlineOrderNumber,
+    createdById: neonCreatedById,
+    createdAt: sale.createdAt,
+  };
+
+  const neonSale = existing
+    ? await neonPrisma.sale.update({ where: { id: existing.id }, data: saleData })
+    : await neonPrisma.sale.create({ data: { id: sale.id, ...saleData } });
+
+  for (const item of sale.items) {
+    const neonProductId = neonProductIds.get(item.productId)!;
+    const neonItem = await neonPrisma.saleItem.upsert({
+      where: { id: item.id },
+      create: {
+        id: item.id,
+        saleId: neonSale.id,
+        productId: neonProductId,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        discount: item.discount,
+        subtotal: item.subtotal,
+        cogsTotal: item.cogsTotal,
+      },
+      update: {
+        saleId: neonSale.id,
+        productId: neonProductId,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        discount: item.discount,
+        subtotal: item.subtotal,
+        cogsTotal: item.cogsTotal,
+      },
+    });
+
+    for (const consumption of item.batchConsumptions) {
+      const neonBatch = await neonPrisma.productBatch.findUnique({ where: { id: consumption.batchId } });
+      if (!neonBatch) {
+        console.warn(`[sync] Skipping missing Neon batch ${consumption.batchId} for sale ${sale.saleNumber}`);
+        continue;
+      }
+      await neonPrisma.saleItemBatchConsumption.upsert({
+        where: { id: consumption.id },
+        create: {
+          id: consumption.id,
+          saleItemId: neonItem.id,
+          batchId: neonBatch.id,
+          quantityConsumed: consumption.quantityConsumed,
+          unitCost: consumption.unitCost,
+        },
+        update: {
+          saleItemId: neonItem.id,
+          batchId: neonBatch.id,
+          quantityConsumed: consumption.quantityConsumed,
+          unitCost: consumption.unitCost,
+        },
+      });
+    }
+  }
+
+  for (const payment of sale.customerPayments) {
+    const paymentCustomer = payment.customerId ? await prisma.customer.findUnique({ where: { id: payment.customerId } }) : null;
+    let paymentNeonCustomerId = neonCustomerId;
+    if (paymentCustomer) {
+      await syncCustomer(paymentCustomer.id);
+      let c = await neonPrisma.customer.findUnique({ where: { id: paymentCustomer.id } });
+      if (!c && paymentCustomer.phone) c = await neonPrisma.customer.findFirst({ where: { phone: paymentCustomer.phone } });
+      paymentNeonCustomerId = c?.id ?? paymentNeonCustomerId;
+    }
+    await neonPrisma.customerPayment.upsert({
+      where: { id: payment.id },
+      create: {
+        id: payment.id,
+        customerId: paymentNeonCustomerId,
+        saleId: neonSale.id,
+        amount: payment.amount,
+        paymentDate: payment.paymentDate,
+        method: payment.method,
+        reference: payment.reference,
+        createdById: await ensureNeonUser(payment.createdById),
+        createdAt: payment.createdAt,
+      },
+      update: {
+        customerId: paymentNeonCustomerId,
+        saleId: neonSale.id,
+        amount: payment.amount,
+        paymentDate: payment.paymentDate,
+        method: payment.method,
+        reference: payment.reference,
+        createdById: await ensureNeonUser(payment.createdById),
+      },
+    });
+  }
+}
+
 async function syncQueueItem(item: {
   entityType: string;
   entityId: string;
   operationType: string;
 }) {
   switch (item.entityType) {
+    case "CUSTOMER":
+      await syncCustomer(item.entityId);
+      return;
+
+    case "SUPPLIER":
+      await syncSupplier(item.entityId);
+      return;
+
+    case "SUPPLIER_PAYMENT":
+      await syncSupplierPayment(item.entityId);
+      return;
+
+    case "BKASH_TRANSACTION":
+      await syncBkashTransaction(item.entityId);
+      return;
+
+    case "CASH_TRANSACTION":
+      await syncCashTransaction(item.entityId);
+      return;
+
+    case "SUPPLIER_RETURN":
+      await syncSupplierReturn(item.entityId);
+      return;
+
+    case "PURCHASE":
+      await syncPurchase(item.entityId);
+      return;
+
     case "PRODUCT":
       await syncProduct(item.entityId);
+      return;
+
+    case "SALE":
+      await syncSale(item.entityId);
       return;
 
     case "PRODUCT_BATCH":
@@ -790,79 +1367,1438 @@ async function syncQueueItem(item: {
   }
 }
 
-export async function syncPendingChanges() {
-  const items = await prisma.syncQueue.findMany({
-    where: {
-      syncStatus: {
-        in: ["PENDING", "FAILED"],
-      },
+
+/**
+ * Ensure every local Product has a syncQueue entry.
+ *
+ * This makes PRODUCT synchronization reliable even when a product
+ * was created/updated through a code path that did not enqueue sync.
+ *
+ * The actual product is always loaded from the local database by
+ * syncProduct(), so the queue payload only needs the product ID.
+ */
+    
+/**
+ * Ensure every local Sale has a syncQueue entry.
+ *
+ * This repairs historical Electron sales that were created before
+ * permanent SALE synchronization existed.
+ */
+async function enqueueMissingSales() {
+  /*
+   * Reconcile every local Electron/POS sale with Neon.
+   *
+   * A sale is considered synchronized only when the corresponding
+   * Neon sale exists. Existing queue records are not trusted because
+   * older records may have failed or become stale.
+   */
+  const sales = await prisma.sale.findMany({
+    select: {
+      id: true,
+      saleNumber: true,
     },
     orderBy: {
       createdAt: "asc",
     },
-    take: BATCH_SIZE,
   });
 
-  if (items.length === 0) {
-    return {
-      synced: 0,
-      failed: 0,
-      pending: 0,
-    };
+  let created = 0;
+
+  for (const sale of sales) {
+    const existingNeonSale = await neonPrisma.sale.findFirst({
+      where: {
+        OR: [
+          { id: sale.id },
+          { saleNumber: sale.saleNumber },
+        ],
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    /*
+     * The sale already exists in Neon.
+     */
+    if (existingNeonSale) {
+      continue;
+    }
+
+    /*
+     * Remove stale pending/failed queue records so this sale gets
+     * a clean synchronization attempt.
+     */
+    await prisma.syncQueue.deleteMany({
+      where: {
+        entityType: "SALE",
+        entityId: sale.id,
+        syncStatus: {
+          in: ["PENDING", "FAILED"],
+        },
+      },
+    });
+
+    await enqueueSync(
+      "SALE",
+      sale.id,
+      "CREATE",
+      {
+        id: sale.id,
+      }
+    );
+
+    created++;
   }
 
-  let synced = 0;
-  let failed = 0;
+  if (created > 0) {
+    console.log(
+      `[sync] Reconciled ${created} POS sale(s) for Neon synchronization.`
+    );
+  }
 
-  for (const item of items) {
-    try {
-      await prisma.syncQueue.update({
-        where: {
-          id: item.id,
+  return created;
+}
+
+async function enqueueMissingProducts() {
+  const products = await prisma.product.findMany({
+    select: {
+      id: true,
+      updatedAt: true,
+    },
+  });
+
+  const queuedProducts = await prisma.syncQueue.findMany({
+    where: {
+      entityType: "PRODUCT",
+      syncStatus: "SYNCED",
+      syncedAt: { not: null },
+    },
+    select: {
+      entityId: true,
+      syncedAt: true,
+    },
+    orderBy: {
+      syncedAt: "desc",
+    },
+  });
+
+  const lastSynced = new Map<string, Date>();
+
+  for (const item of queuedProducts) {
+    if (!lastSynced.has(item.entityId) && item.syncedAt) {
+      lastSynced.set(item.entityId, item.syncedAt);
+    }
+  }
+
+  const missing = products.filter((product) => {
+    const syncedAt = lastSynced.get(product.id);
+
+    // Never synced -> queue it.
+    if (!syncedAt) return true;
+
+    // Product was modified after its last successful sync -> queue it.
+    return product.updatedAt > syncedAt;
+  });
+
+  if (missing.length === 0) {
+    return 0;
+  }
+
+  await prisma.syncQueue.createMany({
+    data: missing.map((product) => ({
+      entityType: "PRODUCT",
+      entityId: product.id,
+      operationType: "UPDATE",
+      payload: JSON.stringify({ id: product.id }),
+      syncStatus: "PENDING",
+    })),
+  });
+
+  return missing.length;
+}
+
+/**
+ * Ensure every local Purchase has a syncQueue entry.
+ *
+ * Some purchase creation/update paths did not explicitly call
+ * enqueueSync(). This reconciliation makes sure historical and
+ * newly-created purchases are also synchronized to Neon.
+ *
+ * The actual purchase and its items are loaded from the local
+ * database by syncPurchase(), so the queue payload only needs
+ * the purchase ID.
+ */
+async function enqueueMissingPurchases() {
+  const [purchases, queuedPurchases] =
+    await Promise.all([
+      prisma.purchase.findMany({
+        select: {
+          id: true,
         },
+      }),
+
+      prisma.syncQueue.findMany({
+        where: {
+          entityType: "PURCHASE",
+        },
+        select: {
+          entityId: true,
+        },
+      }),
+    ]);
+
+  const queuedIds = new Set(
+    queuedPurchases.map((item) => item.entityId)
+  );
+
+  let created = 0;
+
+  for (const purchase of purchases) {
+    if (queuedIds.has(purchase.id)) {
+      continue;
+    }
+
+    await enqueueSync(
+      "PURCHASE",
+      purchase.id,
+      "CREATE",
+      {
+        id: purchase.id,
+      }
+    );
+
+    created++;
+  }
+
+  return created;
+}
+
+
+/**
+ * Ensure every local CashTransaction has a syncQueue entry.
+ *
+ * Cash transactions are created from many different services
+ * (sales, purchases, returns, supplier payments, expenses, salary,
+ * manual cash entries, etc.). Some older code paths did not call
+ * enqueueSync() directly.
+ *
+ * This reconciliation makes cash sync reliable for BOTH:
+ *   1. existing historical local cash transactions
+ *   2. newly-created cash transactions
+ *
+ * The actual transaction is always loaded from the local database
+ * by syncCashTransaction(), so the queue payload itself is only
+ * metadata.
+ */
+async function enqueueMissingCashTransactions() {
+  const [cashTransactions, queuedCashTransactions] =
+    await Promise.all([
+      prisma.cashTransaction.findMany({
+        select: {
+          id: true,
+        },
+      }),
+
+      prisma.syncQueue.findMany({
+        where: {
+          entityType: "CASH_TRANSACTION",
+        },
+        select: {
+          entityId: true,
+        },
+      }),
+    ]);
+
+  const queuedIds = new Set(
+    queuedCashTransactions.map((item) => item.entityId)
+  );
+
+  let created = 0;
+
+  for (const transaction of cashTransactions) {
+    if (queuedIds.has(transaction.id)) {
+      continue;
+    }
+
+    await enqueueSync(
+      "CASH_TRANSACTION",
+      transaction.id,
+      "CREATE",
+      {
+        id: transaction.id,
+      }
+    );
+
+    created++;
+  }
+
+  return created;
+}
+
+
+/**
+ * Ensure every local SupplierPayment has a syncQueue entry.
+ *
+ * This catches historical supplier payments that were created before
+ * their syncQueue entry existed, as well as any payment created by a
+ * code path that failed to enqueue synchronization.
+ */
+async function enqueueMissingSupplierPayments() {
+  const [payments, queuedPayments] =
+    await Promise.all([
+      prisma.supplierPayment.findMany({
+        select: {
+          id: true,
+        },
+      }),
+
+      prisma.syncQueue.findMany({
+        where: {
+          entityType: "SUPPLIER_PAYMENT",
+        },
+        select: {
+          entityId: true,
+        },
+      }),
+    ]);
+
+  const queuedIds = new Set(
+    queuedPayments.map((item) => item.entityId)
+  );
+
+  let created = 0;
+
+  for (const payment of payments) {
+    if (queuedIds.has(payment.id)) {
+      continue;
+    }
+
+    await enqueueSync(
+      "SUPPLIER_PAYMENT",
+      payment.id,
+      "CREATE",
+      {
+        id: payment.id,
+      }
+    );
+
+    created++;
+  }
+
+  return created;
+}
+
+
+/**
+ * PULL: Neon -> local SQLite
+ *
+ * IMPORTANT:
+ * Records pulled from Neon are written directly to the local database.
+ * They are deliberately NOT added to syncQueue.
+ *
+ * Therefore:
+ *
+ *     Neon -> SQLite
+ *
+ * does NOT become:
+ *
+ *     Neon -> SQLite -> Neon -> SQLite
+ */
+export async function pullRemoteChanges() {
+  let pulled = 0;
+
+  // ============================================================
+  // SUPPLIERS
+  // ============================================================
+
+  const remoteSuppliers = await neonPrisma.supplier.findMany();
+
+  for (const remote of remoteSuppliers) {
+    const existing = await prisma.supplier.findFirst({
+      where: {
+        OR: [
+          { id: remote.id },
+          { phone: remote.phone },
+        ],
+      },
+    });
+
+    if (existing) {
+      await prisma.supplier.update({
+        where: { id: existing.id },
         data: {
-          syncStatus: "SYNCING",
-          errorMessage: null,
+          name: remote.name,
+          company: remote.company,
+          phone: remote.phone,
+          email: remote.email,
+          address: remote.address,
+          notes: remote.notes,
+          status: remote.status,
+          updatedAt: remote.updatedAt,
         },
       });
-
-      await syncQueueItem(item);
-
-      await prisma.syncQueue.update({
-        where: {
-          id: item.id,
-        },
+    } else {
+      await prisma.supplier.create({
         data: {
-          syncStatus: "SYNCED",
-          syncedAt: new Date(),
-          errorMessage: null,
-        },
-      });
-
-      synced++;
-    } catch (error) {
-      failed++;
-
-      await prisma.syncQueue.update({
-        where: {
-          id: item.id,
-        },
-        data: {
-          syncStatus: "FAILED",
-          errorMessage:
-            error instanceof Error
-              ? error.message
-              : String(error),
+          id: remote.id,
+          name: remote.name,
+          company: remote.company,
+          phone: remote.phone,
+          email: remote.email,
+          address: remote.address,
+          notes: remote.notes,
+          status: remote.status,
+          createdAt: remote.createdAt,
+          updatedAt: remote.updatedAt,
         },
       });
     }
   }
 
-  const pending = await prisma.syncQueue.count({
-    where: {
-      syncStatus: "PENDING",
+  // ============================================================
+  // CUSTOMERS
+  // ============================================================
+
+  const customerMap = new Map<string, string>();
+  const remoteCustomers = await neonPrisma.customer.findMany({ orderBy: { createdAt: "asc" } });
+
+  for (const remote of remoteCustomers) {
+    let existing = await prisma.customer.findUnique({ where: { id: remote.id } });
+    if (!existing && remote.phone) {
+      existing = await prisma.customer.findFirst({ where: { phone: remote.phone } });
+    }
+
+    if (existing) {
+      await prisma.customer.update({
+        where: { id: existing.id },
+        data: {
+          name: remote.name,
+          phone: remote.phone,
+          address: remote.address,
+          status: remote.status,
+          updatedAt: remote.updatedAt,
+        },
+      });
+      customerMap.set(remote.id, existing.id);
+    } else {
+      const created = await prisma.customer.create({
+        data: {
+          id: remote.id,
+          name: remote.name,
+          phone: remote.phone,
+          address: remote.address,
+          status: remote.status,
+          createdAt: remote.createdAt,
+          updatedAt: remote.updatedAt,
+        },
+      });
+      customerMap.set(remote.id, created.id);
+    }
+  }
+
+  // ============================================================
+  // CATEGORIES
+  // ============================================================
+
+  const categoryMap = new Map<string, string>();
+
+  const remoteCategories = await neonPrisma.category.findMany({
+    orderBy: { createdAt: "asc" },
+  });
+
+  for (const remote of remoteCategories) {
+    const existing = await prisma.category.findUnique({
+      where: { name: remote.name },
+    });
+
+    if (existing) {
+      await prisma.category.update({
+        where: { id: existing.id },
+        data: {
+          description: remote.description,
+          isArchived: remote.isArchived,
+          updatedAt: remote.updatedAt,
+        },
+      });
+
+      categoryMap.set(remote.id, existing.id);
+    } else {
+      const created = await prisma.category.create({
+        data: {
+          id: remote.id,
+          name: remote.name,
+          description: remote.description,
+          isArchived: remote.isArchived,
+          createdAt: remote.createdAt,
+          updatedAt: remote.updatedAt,
+        },
+      });
+
+      categoryMap.set(remote.id, created.id);
+    }
+  }
+
+  // ============================================================
+  // SUBCATEGORIES
+  // ============================================================
+
+  const subcategoryMap = new Map<string, string>();
+
+  const remoteSubcategories =
+    await neonPrisma.subcategory.findMany({
+      orderBy: { createdAt: "asc" },
+    });
+
+  for (const remote of remoteSubcategories) {
+    const localCategoryId = categoryMap.get(remote.categoryId);
+
+    if (!localCategoryId) {
+      console.warn(
+        `[pull] Skipping subcategory ${remote.id}: category mapping missing`
+      );
+      continue;
+    }
+
+    const existing = await prisma.subcategory.findUnique({
+      where: {
+        categoryId_name: {
+          categoryId: localCategoryId,
+          name: remote.name,
+        },
+      },
+    });
+
+    if (existing) {
+      await prisma.subcategory.update({
+        where: { id: existing.id },
+        data: {
+          isArchived: remote.isArchived,
+          updatedAt: remote.updatedAt,
+        },
+      });
+
+      subcategoryMap.set(remote.id, existing.id);
+    } else {
+      const created = await prisma.subcategory.create({
+        data: {
+          id: remote.id,
+          categoryId: localCategoryId,
+          name: remote.name,
+          isArchived: remote.isArchived,
+          createdAt: remote.createdAt,
+          updatedAt: remote.updatedAt,
+        },
+      });
+
+      subcategoryMap.set(remote.id, created.id);
+    }
+  }
+
+  // ============================================================
+  // BRANDS
+  // ============================================================
+
+  const brandMap = new Map<string, string>();
+
+  const remoteBrands = await neonPrisma.brand.findMany();
+
+  for (const remote of remoteBrands) {
+    const existing = await prisma.brand.findUnique({
+      where: { name: remote.name },
+    });
+
+    if (existing) {
+      await prisma.brand.update({
+        where: { id: existing.id },
+        data: {
+          isArchived: remote.isArchived,
+        },
+      });
+
+      brandMap.set(remote.id, existing.id);
+    } else {
+      const created = await prisma.brand.create({
+        data: {
+          id: remote.id,
+          name: remote.name,
+          isArchived: remote.isArchived,
+        },
+      });
+
+      brandMap.set(remote.id, created.id);
+    }
+  }
+
+  // ============================================================
+  // UNITS
+  // ============================================================
+
+  const unitMap = new Map<string, string>();
+
+  const remoteUnits = await neonPrisma.unit.findMany();
+
+  for (const remote of remoteUnits) {
+    const existing = await prisma.unit.findUnique({
+      where: { name: remote.name },
+    });
+
+    if (existing) {
+      await prisma.unit.update({
+        where: { id: existing.id },
+        data: {
+          abbreviation: remote.abbreviation,
+          isArchived: remote.isArchived,
+        },
+      });
+
+      unitMap.set(remote.id, existing.id);
+    } else {
+      const created = await prisma.unit.create({
+        data: {
+          id: remote.id,
+          name: remote.name,
+          abbreviation: remote.abbreviation,
+          isArchived: remote.isArchived,
+        },
+      });
+
+      unitMap.set(remote.id, created.id);
+    }
+  }
+
+  // ============================================================
+  // PRODUCTS
+  // IMPORTANT:
+  // Neon and Electron may have different product IDs.
+  // Reconcile using:
+  //   1. barcode
+  //   2. SKU
+  //   3. ID
+  //
+  // Then keep Neon ID -> Electron ID in productMap.
+  // ============================================================
+
+  const productMap = new Map<string, string>();
+
+  const remoteProducts = await neonPrisma.product.findMany({
+    orderBy: { createdAt: "asc" },
+  });
+
+  for (const remote of remoteProducts) {
+    const categoryId = categoryMap.get(remote.categoryId);
+    const unitId = unitMap.get(remote.unitId);
+
+    if (!categoryId || !unitId) {
+      console.warn(
+        `[pull] Skipping product ${remote.id}: category/unit mapping missing`
+      );
+      continue;
+    }
+
+    const subcategoryId = remote.subcategoryId
+      ? subcategoryMap.get(remote.subcategoryId) ?? null
+      : null;
+
+    const brandId = remote.brandId
+      ? brandMap.get(remote.brandId) ?? null
+      : null;
+
+    let supplierId: string | null = null;
+
+    if (remote.defaultSupplierId) {
+      const localSupplier = await prisma.supplier.findUnique({
+        where: { id: remote.defaultSupplierId },
+      });
+
+      if (localSupplier) {
+        supplierId = localSupplier.id;
+      } else {
+        const remoteSupplier = await neonPrisma.supplier.findUnique({
+          where: { id: remote.defaultSupplierId },
+        });
+
+        if (remoteSupplier) {
+          const matchedSupplier = await prisma.supplier.findFirst({
+            where: { phone: remoteSupplier.phone },
+          });
+
+          if (matchedSupplier) {
+            supplierId = matchedSupplier.id;
+          }
+        }
+      }
+    }
+
+    // ------------------------------------------------------------
+    // Resolve local product identity.
+    //
+    // Barcode/SKU are business identifiers and must take priority
+    // over the database ID because Neon and Electron can have
+    // different IDs for the same product.
+    // ------------------------------------------------------------
+
+    const existingById = await prisma.product.findUnique({
+      where: { id: remote.id },
+    });
+
+    const existingByBarcode = remote.barcode
+      ? await prisma.product.findUnique({
+          where: { barcode: remote.barcode },
+        })
+      : null;
+
+    const existingBySku = remote.sku
+      ? await prisma.product.findUnique({
+          where: { sku: remote.sku },
+        })
+      : null;
+
+    // Barcode and SKU pointing to different local products means
+    // the local database contains an actual identity conflict.
+    if (
+      existingByBarcode &&
+      existingBySku &&
+      existingByBarcode.id !== existingBySku.id
+    ) {
+      throw new Error(
+        `Product identity conflict: Neon product "${remote.name}" ` +
+        `(${remote.id}) has barcode "${remote.barcode}" mapped to ` +
+        `Electron product ${existingByBarcode.id}, while SKU ` +
+        `"${remote.sku}" is mapped to Electron product ${existingBySku.id}.`
+      );
+    }
+
+    // IMPORTANT:
+    // Prefer barcode, then SKU, then ID.
+    const existing =
+      existingByBarcode ??
+      existingBySku ??
+      existingById ??
+      null;
+
+    const data = {
+      name: remote.name,
+      imageUrl: remote.imageUrl,
+      categoryId,
+      subcategoryId,
+      brandId,
+      sku: remote.sku,
+      barcode: remote.barcode,
+      unitId,
+      packSize: remote.packSize,
+      expiryDate: remote.expiryDate,
+      purchasePrice: remote.purchasePrice,
+      sellingPrice: remote.sellingPrice,
+      wholesalePrice: remote.wholesalePrice,
+      minimumStock: remote.minimumStock,
+      currentStock: remote.currentStock,
+      description: remote.description,
+      status: remote.status,
+      defaultSupplierId: supplierId,
+      updatedAt: remote.updatedAt,
+    };
+
+    if (existing) {
+      await prisma.product.update({
+        where: { id: existing.id },
+        data,
+      });
+
+      productMap.set(remote.id, existing.id);
+
+      console.log(
+        `[pull] Product mapped Neon ${remote.id} -> Electron ${existing.id}` +
+        `${remote.barcode ? ` barcode=${remote.barcode}` : ""}`
+      );
+    } else {
+      await prisma.product.create({
+        data: {
+          id: remote.id,
+          ...data,
+          createdAt: remote.createdAt,
+        },
+      });
+
+      productMap.set(remote.id, remote.id);
+
+      console.log(
+        `[pull] Product created ${remote.id}` +
+        `${remote.barcode ? ` barcode=${remote.barcode}` : ""}`
+      );
+    }
+  }
+
+  // ============================================================
+  // USERS
+  // ============================================================
+
+  const remoteUsers = await neonPrisma.user.findMany();
+
+  for (const remote of remoteUsers) {
+    const existing = await prisma.user.findUnique({
+      where: { id: remote.id },
+    });
+
+    if (existing) {
+      await prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          username: remote.username,
+          passwordHash: remote.passwordHash,
+          fullName: remote.fullName,
+          phone: remote.phone,
+          isActive: remote.isActive,
+          lastLoginAt: remote.lastLoginAt,
+          updatedAt: remote.updatedAt,
+        },
+      });
+    }
+  }
+
+  // ============================================================
+  // SALES
+  // IMPORTANT: pull sales before purchases only for the sale records;
+  // sale items/batch consumptions are completed after batches exist.
+  // ============================================================
+
+  const remoteSales = await neonPrisma.sale.findMany({
+    include: {
+      items: { include: { batchConsumptions: true } },
+      customerPayments: true,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  const saleMap = new Map<string, string>();
+  const pendingRemoteSaleItems = remoteSales;
+
+  for (const remote of remoteSales) {
+    let user = await prisma.user.findUnique({ where: { id: remote.createdById } });
+    if (!user) {
+      const remoteUser = await neonPrisma.user.findUnique({ where: { id: remote.createdById } });
+      if (remoteUser) user = await prisma.user.findUnique({ where: { username: remoteUser.username } });
+    }
+    if (!user) {
+      console.warn(`[pull] Skipping sale ${remote.saleNumber}: creator mapping missing`);
+      continue;
+    }
+
+    const localCustomerId = remote.customerId
+      ? customerMap.get(remote.customerId) ?? remote.customerId
+      : null;
+
+    if (localCustomerId) {
+      const customer = await prisma.customer.findUnique({ where: { id: localCustomerId } });
+      if (!customer) {
+        console.warn(`[pull] Skipping sale ${remote.saleNumber}: customer mapping missing`);
+        continue;
+      }
+    }
+
+    let existing = await prisma.sale.findUnique({ where: { id: remote.id } });
+    if (!existing) existing = await prisma.sale.findUnique({ where: { saleNumber: remote.saleNumber } });
+
+    // Resolve the COD collector from Neon to the LOCAL Electron user.
+    // Never copy a Neon user ID directly into the local database.
+    let localCodCollectedById: string | null = null;
+
+    if (remote.codCollectedById) {
+      let codUser = await prisma.user.findUnique({
+        where: { id: remote.codCollectedById },
+      });
+
+      if (!codUser) {
+        const remoteCodUser = await neonPrisma.user.findUnique({
+          where: { id: remote.codCollectedById },
+        });
+
+        if (remoteCodUser) {
+          codUser = await prisma.user.findUnique({
+            where: { username: remoteCodUser.username },
+          });
+        }
+      }
+
+      if (codUser) {
+        localCodCollectedById = codUser.id;
+      } else {
+        console.warn(
+          `[pull] COD collector ${remote.codCollectedById} could not be mapped locally for sale ${remote.saleNumber}; saving null.`
+        );
+      }
+    }
+
+    const saleData = {
+      saleNumber: remote.saleNumber,
+      customerId: localCustomerId,
+      saleDate: remote.saleDate,
+      subtotal: remote.subtotal,
+      discount: remote.discount,
+      totalAmount: remote.totalAmount,
+      cogsAmount: remote.cogsAmount,
+      paymentMethod: remote.paymentMethod,
+      paymentStatus: remote.paymentStatus,
+      status: remote.status,
+      voidReason: remote.voidReason,
+      codCollectedAt: remote.codCollectedAt,
+      codCollectedById: localCodCollectedById,
+      onlineOrderNumber: remote.onlineOrderNumber,
+      createdById: user.id,
+      createdAt: remote.createdAt,
+    };
+
+    if (existing) {
+      await prisma.sale.update({ where: { id: existing.id }, data: saleData });
+      saleMap.set(remote.id, existing.id);
+    } else {
+      const created = await prisma.sale.create({ data: { id: remote.id, ...saleData } });
+      saleMap.set(remote.id, created.id);
+    }
+
+    // Mark the remote sale as already synchronized locally so the
+    // reconciliation pass never re-queues it for Electron -> Neon.
+    const alreadyMarked = await prisma.syncQueue.findFirst({
+      where: { entityType: "SALE", entityId: saleMap.get(remote.id)!, syncStatus: "SYNCED" },
+    });
+    if (!alreadyMarked) {
+      await prisma.syncQueue.create({
+        data: {
+          entityType: "SALE",
+          entityId: saleMap.get(remote.id)!,
+          operationType: "PULL",
+          payload: JSON.stringify({ source: "NEON", remoteId: remote.id }),
+          syncStatus: "SYNCED",
+          syncedAt: new Date(),
+        },
+      });
+    }
+
+    pulled++;
+  }
+
+  // ============================================================
+  // PURCHASES
+  // IMPORTANT: PURCHASES BEFORE BATCHES
+  // ============================================================
+
+  const remotePurchases = await neonPrisma.purchase.findMany({
+    include: {
+      items: true,
+    },
+    orderBy: {
+      createdAt: "asc",
     },
   });
+
+  // IMPORTANT:
+  // Neon purchase IDs and Electron purchase IDs can be different.
+  // We reconcile by:
+  //   1. ID
+  //   2. purchaseNumber
+  //
+  // Then every dependent record (batches/items) uses the LOCAL ID.
+  const purchaseMap = new Map<string, string>();
+
+  for (const remote of remotePurchases) {
+    let supplier = await prisma.supplier.findUnique({
+      where: { id: remote.supplierId },
+    });
+
+    if (!supplier) {
+      const remoteSupplier =
+        await neonPrisma.supplier.findUnique({
+          where: { id: remote.supplierId },
+        });
+
+      if (remoteSupplier) {
+        supplier = await prisma.supplier.findFirst({
+          where: {
+            phone: remoteSupplier.phone,
+          },
+        });
+      }
+    }
+
+    let user = await prisma.user.findUnique({
+      where: { id: remote.createdById },
+    });
+
+    if (!user) {
+      const remoteUser = await neonPrisma.user.findUnique({
+        where: { id: remote.createdById },
+      });
+
+      if (remoteUser) {
+        user = await prisma.user.findUnique({
+          where: {
+            username: remoteUser.username,
+          },
+        });
+      }
+    }
+
+    if (!supplier || !user) {
+      console.warn(
+        `[pull] Skipping purchase ${remote.purchaseNumber}: supplier/user mapping missing`
+      );
+      continue;
+    }
+
+    /*
+     * IMPORTANT:
+     * Do NOT use upsert(where: { id: remote.id }).
+     *
+     * A purchase may already exist locally with the same
+     * purchaseNumber but a different ID.
+     */
+
+    let existingPurchase = await prisma.purchase.findUnique({
+      where: { id: remote.id },
+    });
+
+    if (!existingPurchase) {
+      existingPurchase = await prisma.purchase.findUnique({
+        where: {
+          purchaseNumber: remote.purchaseNumber,
+        },
+      });
+    }
+
+    const purchaseData = {
+      purchaseNumber: remote.purchaseNumber,
+      supplierId: supplier.id,
+      invoiceNumber: remote.invoiceNumber,
+      purchaseDate: remote.purchaseDate,
+      totalAmount: remote.totalAmount,
+      paidAmount: remote.paidAmount,
+      dueAmount: remote.dueAmount,
+      paymentStatus: remote.paymentStatus,
+      status: remote.status,
+      voidReason: remote.voidReason,
+      createdById: user.id,
+    };
+
+    if (existingPurchase) {
+      await prisma.purchase.update({
+        where: {
+          id: existingPurchase.id,
+        },
+        data: purchaseData,
+      });
+
+      // Neon ID -> LOCAL Electron ID
+      purchaseMap.set(remote.id, existingPurchase.id);
+
+      console.log(
+        `[pull] Purchase reconciled: Neon ${remote.id} -> Electron ${existingPurchase.id} (${remote.purchaseNumber})`
+      );
+    } else {
+      const createdPurchase = await prisma.purchase.create({
+        data: {
+          id: remote.id,
+          ...purchaseData,
+          createdAt: remote.createdAt,
+        },
+      });
+
+      purchaseMap.set(remote.id, createdPurchase.id);
+
+      console.log(
+        `[pull] Purchase created: ${remote.id} (${remote.purchaseNumber})`
+      );
+    }
+
+    pulled++;
+  }
+
+  // ============================================================
+  // PRODUCT BATCHES
+  // IMPORTANT: AFTER PURCHASES
+  // ============================================================
+
+  const remoteBatches =
+    await neonPrisma.productBatch.findMany({
+      orderBy: {
+        createdAt: "asc",
+      },
+    });
+
+  for (const remote of remoteBatches) {
+    // Resolve Neon product ID to the actual Electron product ID.
+    const localProductId =
+      productMap.get(remote.productId) ?? remote.productId;
+
+    const product = await prisma.product.findUnique({
+      where: { id: localProductId },
+    });
+
+    if (!product) {
+      console.warn(
+        `[pull] Skipping batch ${remote.id}: product mapping missing ` +
+        `(Neon product ${remote.productId})`
+      );
+      continue;
+    }
+
+    // IMPORTANT:
+    // ProductBatch.purchaseId must use the LOCAL Electron purchase ID.
+    // Never use remote.purchaseId directly.
+    const localPurchaseId = remote.purchaseId
+      ? purchaseMap.get(remote.purchaseId) ?? null
+      : null;
+
+    if (remote.purchaseId && !localPurchaseId) {
+      console.warn(
+        `[pull] Skipping batch ${remote.id}: purchase mapping missing for Neon purchase ${remote.purchaseId}`
+      );
+      continue;
+    }
+
+    let supplierId = remote.supplierId;
+
+    if (supplierId) {
+      const supplier = await prisma.supplier.findUnique({
+        where: { id: supplierId },
+      });
+
+      if (!supplier) {
+        supplierId = null;
+      }
+    }
+
+    await prisma.productBatch.upsert({
+      where: { id: remote.id },
+      create: {
+        id: remote.id,
+        productId: product.id,
+        supplierId,
+        purchaseId: localPurchaseId,
+        batchCode: remote.batchCode,
+        purchaseDate: remote.purchaseDate,
+        manufacturingDate: remote.manufacturingDate,
+        quantityReceived: remote.quantityReceived,
+        remainingQuantity: remote.remainingQuantity,
+        quantityReturned: remote.quantityReturned,
+        purchasePrice: remote.purchasePrice,
+        expiryDate: remote.expiryDate,
+        purchaseInvoiceNumber: remote.purchaseInvoiceNumber,
+        notes: remote.notes,
+        status: remote.status,
+        createdAt: remote.createdAt,
+        updatedAt: remote.updatedAt,
+        sellingPrice: remote.sellingPrice,
+      },
+      update: {
+        productId: product.id,
+        supplierId,
+        purchaseId: localPurchaseId,
+        batchCode: remote.batchCode,
+        purchaseDate: remote.purchaseDate,
+        manufacturingDate: remote.manufacturingDate,
+        quantityReceived: remote.quantityReceived,
+        remainingQuantity: remote.remainingQuantity,
+        quantityReturned: remote.quantityReturned,
+        purchasePrice: remote.purchasePrice,
+        expiryDate: remote.expiryDate,
+        purchaseInvoiceNumber: remote.purchaseInvoiceNumber,
+        notes: remote.notes,
+        status: remote.status,
+        updatedAt: remote.updatedAt,
+        sellingPrice: remote.sellingPrice,
+      },
+    });
+  }
+
+  // ============================================================
+  // SALE ITEMS + BATCH CONSUMPTIONS
+  // ============================================================
+
+  for (const remote of pendingRemoteSaleItems) {
+    const localSaleId = saleMap.get(remote.id);
+    if (!localSaleId) continue;
+
+    for (const item of remote.items) {
+      const localProductId = productMap.get(item.productId) ?? item.productId;
+      const product = await prisma.product.findUnique({ where: { id: localProductId } });
+      if (!product) {
+        console.warn(`[pull] Skipping sale item ${item.id}: product mapping missing`);
+        continue;
+      }
+
+      const localSaleItem = await prisma.saleItem.upsert({
+        where: { id: item.id },
+        create: {
+          id: item.id,
+          saleId: localSaleId,
+          productId: product.id,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          discount: item.discount,
+          subtotal: item.subtotal,
+          cogsTotal: item.cogsTotal,
+        },
+        update: {
+          saleId: localSaleId,
+          productId: product.id,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          discount: item.discount,
+          subtotal: item.subtotal,
+          cogsTotal: item.cogsTotal,
+        },
+      });
+
+      for (const consumption of item.batchConsumptions) {
+        const batch = await prisma.productBatch.findUnique({ where: { id: consumption.batchId } });
+        if (!batch) {
+          console.warn(`[pull] Skipping sale batch consumption ${consumption.id}: batch missing`);
+          continue;
+        }
+        await prisma.saleItemBatchConsumption.upsert({
+          where: { id: consumption.id },
+          create: {
+            id: consumption.id,
+            saleItemId: localSaleItem.id,
+            batchId: batch.id,
+            quantityConsumed: consumption.quantityConsumed,
+            unitCost: consumption.unitCost,
+          },
+          update: {
+            saleItemId: localSaleItem.id,
+            batchId: batch.id,
+            quantityConsumed: consumption.quantityConsumed,
+            unitCost: consumption.unitCost,
+          },
+        });
+      }
+    }
+
+    for (const payment of remote.customerPayments) {
+      const localCustomerId = payment.customerId
+        ? customerMap.get(payment.customerId) ?? payment.customerId
+        : null;
+      if (localCustomerId) {
+        const customer = await prisma.customer.findUnique({ where: { id: localCustomerId } });
+        if (!customer) continue;
+      }
+      let user = await prisma.user.findUnique({ where: { id: payment.createdById } });
+      if (!user) {
+        const remoteUser = await neonPrisma.user.findUnique({ where: { id: payment.createdById } });
+        if (remoteUser) user = await prisma.user.findUnique({ where: { username: remoteUser.username } });
+      }
+      if (!user) continue;
+
+      await prisma.customerPayment.upsert({
+        where: { id: payment.id },
+        create: {
+          id: payment.id,
+          customerId: localCustomerId,
+          saleId: localSaleId,
+          amount: payment.amount,
+          paymentDate: payment.paymentDate,
+          method: payment.method,
+          reference: payment.reference,
+          createdById: user.id,
+          createdAt: payment.createdAt,
+        },
+        update: {
+          customerId: localCustomerId,
+          saleId: localSaleId,
+          amount: payment.amount,
+          paymentDate: payment.paymentDate,
+          method: payment.method,
+          reference: payment.reference,
+          createdById: user.id,
+        },
+      });
+    }
+  }
+
+  // ============================================================
+  // PURCHASE ITEMS
+  // ============================================================
+
+  for (const remote of remotePurchases) {
+    // IMPORTANT:
+    // Use the reconciled LOCAL Electron purchase ID.
+    const localPurchaseId = purchaseMap.get(remote.id);
+
+    if (!localPurchaseId) {
+      console.warn(
+        `[pull] Skipping purchase items for ${remote.purchaseNumber}: purchase mapping missing`
+      );
+      continue;
+    }
+
+    for (const item of remote.items) {
+      // Purchase items come from Neon and may contain the Neon
+      // product ID. Resolve it to the actual Electron product ID.
+      const localProductId =
+        productMap.get(item.productId) ?? item.productId;
+
+      const product = await prisma.product.findUnique({
+        where: { id: localProductId },
+      });
+
+      if (!product) {
+        console.warn(
+          `[pull] Skipping purchase item ${item.id}: product mapping missing ` +
+          `(Neon product ${item.productId})`
+        );
+        continue;
+      }
+
+      let batchId: string | null = null;
+
+      if (item.batchId) {
+        const batch = await prisma.productBatch.findUnique({
+          where: { id: item.batchId },
+        });
+
+        if (!batch) {
+          console.warn(
+            `[pull] Skipping purchase item ${item.id}: batch missing`
+          );
+          continue;
+        }
+
+        batchId = batch.id;
+      }
+
+      await prisma.purchaseItem.upsert({
+        where: { id: item.id },
+        create: {
+          id: item.id,
+          purchaseId: localPurchaseId,
+          productId: product.id,
+          batchId,
+          quantity: item.quantity,
+          unitCost: item.unitCost,
+          total: item.total,
+        },
+        update: {
+          purchaseId: localPurchaseId,
+          productId: product.id,
+          batchId,
+          quantity: item.quantity,
+          unitCost: item.unitCost,
+          total: item.total,
+        },
+      });
+    }
+  }
+
+  return {
+    pulled,
+  };
+}
+
+export async function syncPendingChanges() {
+  /*
+   * POS -> Neon synchronization.
+   *
+   * Always reconcile local sales first, then drain the queue.
+   * A single failed item must never prevent the remaining POS data
+   * from reaching Neon.
+   */
+  await enqueueMissingSales();
+
+  await enqueueMissingProducts();
+  await enqueueMissingPurchases();
+  await enqueueMissingCashTransactions();
+  await enqueueMissingSupplierPayments();
+
+  let synced = 0;
+  let failed = 0;
+
+  /*
+   * Drain multiple batches so a large number of POS sales can be
+   * synchronized in the same sync cycle.
+   */
+  for (let pass = 0; pass < 20; pass++) {
+    const items = await prisma.syncQueue.findMany({
+      where: {
+        syncStatus: {
+          in: ["PENDING", "FAILED"],
+        },
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+      take: BATCH_SIZE,
+    });
+
+    if (items.length === 0) {
+      break;
+    }
+
+    for (const item of items) {
+      try {
+        await prisma.syncQueue.update({
+          where: { id: item.id },
+          data: {
+            syncStatus: "SYNCING",
+            errorMessage: null,
+          },
+        });
+
+        await syncQueueItem(item);
+
+        await prisma.syncQueue.update({
+          where: { id: item.id },
+          data: {
+            syncStatus: "SYNCED",
+            syncedAt: new Date(),
+            errorMessage: null,
+          },
+        });
+
+        synced++;
+
+        console.log(
+          `[sync] ${item.entityType} ${item.entityId} -> Neon OK`
+        );
+      } catch (error) {
+        failed++;
+
+        const message =
+          error instanceof Error
+            ? error.message
+            : String(error);
+
+        await prisma.syncQueue.update({
+          where: { id: item.id },
+          data: {
+            syncStatus: "FAILED",
+            errorMessage: message,
+          },
+        });
+
+        console.error(
+          `[sync] ${item.entityType} ${item.entityId} -> Neon FAILED: ${message}`
+        );
+      }
+    }
+
+    /*
+     * If this batch contained only failed records, don't spin forever.
+     */
+    if (items.every(async () => false)) {
+      break;
+    }
+  }
+
+  const pending = await prisma.syncQueue.count({
+    where: {
+      syncStatus: {
+        in: ["PENDING", "FAILED", "SYNCING"],
+      },
+    },
+  });
+
+  console.log(
+    `[sync] completed: synced=${synced}, failed=${failed}, pending=${pending}`
+  );
 
   return {
     synced,

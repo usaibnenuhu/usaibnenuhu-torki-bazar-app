@@ -4,6 +4,7 @@ import { INVOICE_PREFIXES } from "@torki-bazar/shared";
 import type { AuthSession } from "../context";
 import { assertPermission } from "../context";
 import { recordAuditLog } from "../audit/auditService";
+import { enqueueSync } from "../sync/syncService";
 import { nextInvoiceNumber } from "../invoicing/invoiceNumberService";
 import { receiveBatch, adjustStock } from "../inventory/inventoryService";
 import { getSupplierOutstanding } from "../suppliers/supplierService";
@@ -369,6 +370,28 @@ export async function createPurchase(
           purchaseNumber,
           totalAmount,
         },
+      },
+      tx
+    );
+
+    await enqueueSync(
+      "PURCHASE",
+      purchase.id,
+      "CREATE",
+      {
+        id: purchase.id,
+        purchaseNumber: purchase.purchaseNumber,
+        supplierId: purchase.supplierId,
+        invoiceNumber: purchase.invoiceNumber,
+        purchaseDate: purchase.purchaseDate,
+        totalAmount: purchase.totalAmount,
+        paidAmount: purchase.paidAmount,
+        dueAmount: purchase.dueAmount,
+        paymentStatus: purchase.paymentStatus,
+        status: purchase.status,
+        voidReason: purchase.voidReason,
+        createdById: purchase.createdById,
+        createdAt: purchase.createdAt,
       },
       tx
     );
@@ -778,6 +801,7 @@ export async function recordSupplierPayment(
     purchaseId?: string;
     amount: number;
     method: string;
+    idempotencyKey?: string;
     reference?: string;
     notes?: string;
     paymentDate?: Date | string;
@@ -844,6 +868,21 @@ export async function recordSupplierPayment(
 
   return prisma.$transaction(
     async (tx) => {
+      // Idempotency: if the same payment request is submitted twice,
+      // return the payment created by the first request.
+      if (input.idempotencyKey) {
+        const existingPayment =
+          await tx.supplierPayment.findUnique({
+            where: {
+              idempotencyKey: input.idempotencyKey,
+            },
+          });
+
+        if (existingPayment) {
+          return existingPayment;
+        }
+      }
+
       const paymentNumber =
         await nextInvoiceNumber(
           tx as unknown as typeof prisma,
@@ -866,6 +905,8 @@ export async function recordSupplierPayment(
               input.supplierId,
             purchaseId:
               input.purchaseId,
+            idempotencyKey:
+              input.idempotencyKey,
             amount: input.amount,
             method: input.method,
             reference:
@@ -881,6 +922,28 @@ export async function recordSupplierPayment(
               session.userId,
           },
         });
+
+      await enqueueSync(
+        "SUPPLIER_PAYMENT",
+        payment.id,
+        "CREATE",
+        {
+          id: payment.id,
+          paymentNumber: payment.paymentNumber,
+          supplierId: payment.supplierId,
+          purchaseId: payment.purchaseId,
+          amount: payment.amount,
+          paymentDate: payment.paymentDate,
+          method: payment.method,
+          reference: payment.reference,
+          notes: payment.notes,
+          previousOutstanding: payment.previousOutstanding,
+          remainingOutstanding: payment.remainingOutstanding,
+          createdById: payment.createdById,
+          createdAt: payment.createdAt,
+        },
+        tx
+      );
 
       let purchaseNumberForNote =
         paymentNumber;
@@ -1057,6 +1120,28 @@ export async function voidPurchase(
             voidReason: reason,
           },
         });
+
+      await enqueueSync(
+        "PURCHASE",
+        updated.id,
+        "UPDATE",
+        {
+          id: updated.id,
+          purchaseNumber: updated.purchaseNumber,
+          supplierId: updated.supplierId,
+          invoiceNumber: updated.invoiceNumber,
+          purchaseDate: updated.purchaseDate,
+          totalAmount: updated.totalAmount,
+          paidAmount: updated.paidAmount,
+          dueAmount: updated.dueAmount,
+          paymentStatus: updated.paymentStatus,
+          status: updated.status,
+          voidReason: updated.voidReason,
+          createdById: updated.createdById,
+          createdAt: updated.createdAt,
+        },
+        tx
+      );
 
       await recordAuditLog(
         session,

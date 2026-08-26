@@ -171,6 +171,9 @@ export function PurchasesPage() {
     notes: "",
   });
 
+  const [paymentIdempotencyKey, setPaymentIdempotencyKey] =
+    useState("");
+
   const push =
     useToastStore((s) => s.push);
 
@@ -320,6 +323,8 @@ export function PurchasesPage() {
       return;
     }
 
+    setSaving(true);
+
     try {
       await call(
         "purchases:recordPayment",
@@ -335,6 +340,9 @@ export function PurchasesPage() {
 
           method:
             payForm.method,
+
+          idempotencyKey:
+            paymentIdempotencyKey,
 
           reference:
             payForm.reference ||
@@ -361,6 +369,8 @@ export function PurchasesPage() {
           : "Failed to record payment",
         "error"
       );
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -671,6 +681,10 @@ export function PurchasesPage() {
                               notes:
                                 "",
                             });
+
+                            setPaymentIdempotencyKey(
+                              crypto.randomUUID()
+                            );
 
                             setPayTarget(
                               p
@@ -1187,8 +1201,9 @@ export function PurchasesPage() {
               <Button
                 type="submit"
                 className="w-full"
+                disabled={saving}
               >
-                Record Payment
+                {saving ? "Recording..." : "Record Payment"}
               </Button>
             </form>
           )}

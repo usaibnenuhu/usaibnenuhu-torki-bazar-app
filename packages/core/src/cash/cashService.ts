@@ -3,6 +3,7 @@ import { PERMISSIONS, ValidationError } from "@torki-bazar/shared";
 import type { AuthSession } from "../context";
 import { assertPermission } from "../context";
 import { recordAuditLog } from "../audit/auditService";
+import { enqueueSync } from "../sync/syncService";
 
 export interface CreateCashTransactionInput {
   type: "MANUAL_IN" | "MANUAL_OUT";
@@ -45,6 +46,21 @@ export async function createCashTransaction(
       createdById: session.userId,
     },
   });
+
+  await enqueueSync(
+    "CASH_TRANSACTION",
+    transaction.id,
+    "CREATE",
+    {
+      id: transaction.id,
+      type: transaction.type,
+      amount: transaction.amount,
+      transactionDate: transaction.transactionDate,
+      note: transaction.note,
+      createdById: transaction.createdById,
+      createdAt: transaction.createdAt,
+    }
+  );
 
   await recordAuditLog(session, {
     action: "CREATE",
@@ -259,6 +275,22 @@ export async function recordExpenseCashOutflow(
       createdById: session.userId,
     },
   });
+
+  await enqueueSync(
+    "CASH_TRANSACTION",
+    transaction.id,
+    "CREATE",
+    {
+      id: transaction.id,
+      type: transaction.type,
+      amount: transaction.amount,
+      transactionDate: transaction.transactionDate,
+      note: transaction.note,
+      createdById: transaction.createdById,
+      createdAt: transaction.createdAt,
+    },
+    tx
+  );
 
   await recordAuditLog(
     session,

@@ -3,6 +3,7 @@ import { PERMISSIONS, ValidationError } from "@torki-bazar/shared";
 import type { AuthSession } from "../context";
 import { assertPermission } from "../context";
 import { recordAuditLog } from "../audit/auditService";
+import { enqueueSync } from "../sync/syncService";
 
 export interface CreateBkashTransactionInput {
   type: "MANUAL_IN" | "MANUAL_OUT";
@@ -37,6 +38,13 @@ export async function createBkashTransaction(
     recordId: transaction.id,
     newValue: transaction,
   });
+
+  await enqueueSync(
+    "BKASH_TRANSACTION",
+    transaction.id,
+    "CREATE",
+    transaction
+  );
 
   return transaction;
 }
@@ -96,6 +104,13 @@ export async function recordBkashSaleInflow(
     },
   });
   await recordAuditLog(session, { action: "CREATE", module: "BKASH_TRANSACTION", recordId: transaction.id, newValue: transaction }, tx);
+  await enqueueSync(
+    "BKASH_TRANSACTION",
+    transaction.id,
+    "CREATE",
+    transaction,
+    tx
+  );
   return transaction;
 }
 
@@ -116,6 +131,13 @@ export async function recordBkashReturnOutflow(
     },
   });
   await recordAuditLog(session, { action: "CREATE", module: "BKASH_TRANSACTION", recordId: transaction.id, newValue: transaction }, tx);
+  await enqueueSync(
+    "BKASH_TRANSACTION",
+    transaction.id,
+    "CREATE",
+    transaction,
+    tx
+  );
   return transaction;
 }
 
@@ -138,5 +160,12 @@ export async function recordBkashExpenseOutflow(
     },
   });
   await recordAuditLog(session, { action: "CREATE", module: "BKASH_TRANSACTION", recordId: transaction.id, newValue: transaction }, tx);
+  await enqueueSync(
+    "BKASH_TRANSACTION",
+    transaction.id,
+    "CREATE",
+    transaction,
+    tx
+  );
   return transaction;
 }

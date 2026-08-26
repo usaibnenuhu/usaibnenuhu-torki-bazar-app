@@ -1,0 +1,1270 @@
+import { prisma, Prisma } from "@torki-bazar/database";
+import {
+  PERMISSIONS,
+  INVOICE_PREFIXES,
+  ValidationError,
+  NotFoundError,
+} from "@torki-bazar/shared";
+import type { AuthSession } from "../context";
+import { assertPermission } from "../context";
+import { recordAuditLog } from "../audit/auditService";
+import { nextInvoiceNumber } from "../invoicing/invoiceNumberService";
+import {
+  consumeFifo,
+  recordStockMovement,
+} from "../inventory/inventoryService";
+import { recordBkashSaleInflow } from "../bKash/bkashService";
+
+function generateUuid() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(
+    /[xy]/g,
+    (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v =
+        c === "x"
+          ? r
+          : (r & 0x3) | 0x8;
+
+      return v.toString(16);
+    }
+  );
+}
+
+export interface SaleItemInput {
+  productId: string;
+  quantity: number;
+  unitPrice: number;
+  discount?: number;
+}
+
+export interface CreateSaleInput {
+  customerId?: string;
+  customerName?: string;
+  customerPhone?: string;
+  items: SaleItemInput[];
+  overallDiscount?: number;
+  paymentMethod:
+    | "CASH"
+    | "BKASH"
+    | "COD"
+    | "CREDIT";
+  paidAmount?: number;
+  onlineOrderNumber?: string;
+  
+}
+
+export function normalizePhone(
+  raw?: string | null
+): string | undefined {
+  const cleaned = (raw ?? "").replace(
+    /[^\d+]/g,
+    ""
+  );
+
+  return cleaned || undefined;
+}
+
+async function resolveCustomerId(
+  tx: Prisma.TransactionClient,
+  input: Pick<
+    CreateSaleInput,
+    | "customerId"
+    | "customerName"
+    | "customerPhone"
+  >
+): Promise<string | undefined> {
+  if (input.customerId) {
+    return input.customerId;
+  }
+
+  const phone = normalizePhone(
+    input.customerPhone
+  );
+
+  if (!phone) {
+    return undefined;
+  }
+
+  const exact =
+    await tx.customer.findUnique({
+      where: {
+        phone,
+      },
+    });
+
+  if (exact) {
+    return exact.id;
+  }
+
+  const candidates =
+    await tx.customer.findMany({
+      where: {
+        phone: {
+          not: null,
+        },
+      },
+      select: {
+        id: true,
+        phone: true,
+      },
+    });
+
+  const match = candidates.find(
+    (c) =>
+      normalizePhone(c.phone) === phone
+  );
+
+  if (match) {
+    return match.id;
+  }
+
+  const created =
+    await tx.customer.create({
+      data: {
+        name:
+          input.customerName?.trim() ||
+          phone,
+        phone,
+      },
+    });
+
+  return created.id;
+}
+
+/**
+ * Create an automatic cash transaction only once.
+ * Strictly checks by note to completely prevent duplicate entries.
+ */
+async function createCashTransactionOnce(
+  tx: Prisma.TransactionClient,
+  input: {
+    type: "MANUAL_IN" | "MANUAL_OUT";
+    amount: Prisma.Decimal | number;
+    transactionDate: Date;
+    note: string;
+    createdById: string;
+  }
+) {
+  const existing =
+    await tx.cashTransaction.findFirst({
+      where: {
+        note: input.note,
+      },
+    });
+
+  if (existing) {
+    return existing;
+  }
+
+  return tx.cashTransaction.create({
+    data: {
+      type: input.type,
+      amount: input.amount,
+      transactionDate:
+        input.transactionDate,
+      note: input.note,
+      createdById:
+        input.createdById,
+    },
+  });
+}
+
+export async function createSale(
+  session: AuthSession,
+  input: CreateSaleInput
+) {
+  assertPermission(
+    session,
+    PERMISSIONS.POS_USE
+  );
+
+  if (input.items.length === 0) {
+    throw new ValidationError(
+      "A sale must contain at least one item."
+    );
+  }
+
+  if (
+    input.paymentMethod === "CREDIT" &&
+    !input.customerId
+  ) {
+    throw new ValidationError(
+      "A customer must be selected for credit sales."
+    );
+  }
+
+  return prisma.$transaction(
+    async (tx) => {
+      const customerId =
+        await resolveCustomerId(
+          tx,
+          input
+        );
+
+      const saleId =
+        generateUuid();
+
+      const saleNumber =
+        await nextInvoiceNumber(
+          tx as unknown as typeof prisma,
+          INVOICE_PREFIXES.SALE
+        );
+
+      let subtotal =
+        new Prisma.Decimal(0);
+
+      let cogsAmount =
+        new Prisma.Decimal(0);
+
+      const itemRecords: {
+        data: Prisma.SaleItemUncheckedCreateInput;
+        consumptions: Awaited<
+          ReturnType<typeof consumeFifo>
+        >;
+      }[] = [];
+
+      for (const item of input.items) {
+        if (item.quantity <= 0) {
+          throw new ValidationError(
+            "Item quantity must be greater than zero."
+          );
+        }
+
+        const lineSubtotal =
+          new Prisma.Decimal(
+            item.unitPrice
+          )
+            .mul(item.quantity)
+            .sub(
+              item.discount ?? 0
+            );
+
+        subtotal =
+          subtotal.add(
+            lineSubtotal
+          );
+
+        const consumptions =
+          await consumeFifo(tx, {
+            productId:
+              item.productId,
+            quantity:
+              item.quantity,
+            userId:
+              session.userId,
+            referenceType:
+              "SALE",
+            referenceId:
+              saleId,
+          });
+
+        const cogsTotal =
+          consumptions.reduce(
+            (sum, c) =>
+              sum.add(
+                c.quantityConsumed.mul(
+                  c.unitCost
+                )
+              ),
+            new Prisma.Decimal(0)
+          );
+
+        cogsAmount =
+          cogsAmount.add(
+            cogsTotal
+          );
+
+        itemRecords.push({
+          data: {
+            saleId: "",
+            productId:
+              item.productId,
+            quantity:
+              item.quantity,
+            unitPrice:
+              item.unitPrice,
+            discount:
+              item.discount ?? 0,
+            subtotal:
+              lineSubtotal,
+            cogsTotal,
+          },
+          consumptions,
+        });
+      }
+
+      const overallDiscount =
+        new Prisma.Decimal(
+          input.overallDiscount ?? 0
+        );
+
+      const totalAmount =
+        subtotal.sub(
+          overallDiscount
+        );
+
+      let paymentStatus:
+        | "PAID"
+        | "PARTIAL"
+        | "DUE"
+        | "COD_PENDING";
+
+      let paidAmount =
+        new Prisma.Decimal(0);
+
+      if (
+        input.paymentMethod === "COD"
+      ) {
+        paymentStatus =
+          "COD_PENDING";
+      } else if (
+        input.paymentMethod === "CREDIT"
+      ) {
+        paidAmount =
+          new Prisma.Decimal(
+            input.paidAmount ?? 0
+          );
+
+        const due =
+          totalAmount.sub(
+            paidAmount
+          );
+
+        paymentStatus =
+          due.lte(0)
+            ? "PAID"
+            : paidAmount.gt(0)
+            ? "PARTIAL"
+            : "DUE";
+      } else {
+        paidAmount =
+          totalAmount;
+
+        paymentStatus =
+          "PAID";
+      }
+
+      const sale =
+        await tx.sale.create({
+          data: {
+            id: saleId,
+            saleNumber,
+            customerId,
+            subtotal,
+            discount:
+              overallDiscount,
+            totalAmount,
+            cogsAmount,
+            paymentMethod:
+              input.paymentMethod,
+            paymentStatus,
+            onlineOrderNumber:
+              input.onlineOrderNumber,
+            createdById:
+              session.userId,
+          },
+        });
+
+      for (const record of itemRecords) {
+        const saleItem =
+          await tx.saleItem.create({
+            data: {
+              ...record.data,
+              saleId:
+                sale.id,
+            },
+          });
+
+        for (const consumption of record.consumptions) {
+          await tx.saleItemBatchConsumption.create(
+            {
+              data: {
+                saleItemId:
+                  saleItem.id,
+                batchId:
+                  consumption.batchId,
+                quantityConsumed:
+                  consumption.quantityConsumed,
+                unitCost:
+                  consumption.unitCost,
+              },
+            }
+          );
+        }
+      }
+
+      if (
+        input.paymentMethod ===
+          "CREDIT" &&
+        paidAmount.gt(0) &&
+        customerId
+      ) {
+        await tx.customerPayment.create(
+          {
+            data: {
+              customerId,
+              saleId:
+                sale.id,
+              amount:
+                paidAmount,
+              method:
+                "CASH",
+              createdById:
+                session.userId,
+            },
+          }
+        );
+
+        await createCashTransactionOnce(
+          tx,
+          {
+            type:
+              "MANUAL_IN",
+            amount:
+              paidAmount,
+            transactionDate:
+              sale.saleDate,
+            note:
+              `Credit payment - ${sale.saleNumber}`,
+            createdById:
+              session.userId,
+          }
+        );
+      }
+
+      if (
+        input.paymentMethod ===
+          "CASH" &&
+        totalAmount.gt(0)
+      ) {
+        await createCashTransactionOnce(
+          tx,
+          {
+            type:
+              "MANUAL_IN",
+            amount:
+              totalAmount,
+            transactionDate:
+              sale.saleDate,
+            note:
+              `Cash sale - ${sale.saleNumber}`,
+            createdById:
+              session.userId,
+          }
+        );
+      }
+
+      if (
+        input.paymentMethod ===
+          "BKASH" &&
+        totalAmount.gt(0)
+      ) {
+        await recordBkashSaleInflow(
+          tx,
+          session,
+          Number(totalAmount),
+          sale.saleNumber
+        );
+      }
+
+      await recordAuditLog(
+        session,
+        {
+          action:
+            "CREATE",
+          module:
+            "SALE",
+          recordId:
+            sale.id,
+          newValue: {
+            saleNumber,
+            totalAmount,
+            cogsAmount,
+          },
+        },
+        tx
+      );
+
+      return sale;
+    }
+  );
+}
+
+// ============================================================
+// COD COLLECTION
+// ============================================================
+
+export async function markCodCollected(
+  session: AuthSession,
+  saleId: string,
+  input: {
+    reference?: string;
+  } = {}
+) {
+  assertPermission(
+    session,
+    PERMISSIONS.COD_COLLECT
+  );
+
+  return prisma.$transaction(
+    async (tx) => {
+      const sale =
+        await tx.sale.findUnique({
+          where: {
+            id: saleId,
+          },
+        });
+
+      if (!sale) {
+        throw new NotFoundError(
+          "Sale not found."
+        );
+      }
+
+      if (
+        sale.paymentMethod !==
+          "COD" ||
+        sale.paymentStatus !==
+          "COD_PENDING"
+      ) {
+        throw new ValidationError(
+          "This sale is not a pending COD order."
+        );
+      }
+
+      const collectionDate =
+        new Date();
+
+      const updated =
+        await tx.sale.update({
+          where: {
+            id: saleId,
+          },
+          data: {
+            paymentStatus:
+              "PAID",
+            codCollectedAt:
+              collectionDate,
+            codCollectedById:
+              session.userId,
+          },
+        });
+
+      if (sale.customerId) {
+        const existingPayment =
+          await tx.customerPayment.findFirst(
+            {
+              where: {
+                saleId,
+                method: "COD",
+              },
+            }
+          );
+
+        if (!existingPayment) {
+          await tx.customerPayment.create(
+            {
+              data: {
+                customerId:
+                  sale.customerId,
+                saleId,
+                amount:
+                  sale.totalAmount,
+                method:
+                  "COD",
+                reference:
+                  input.reference,
+                createdById:
+                  session.userId,
+              },
+            }
+          );
+        }
+      }
+
+      await createCashTransactionOnce(
+        tx,
+        {
+          type:
+            "MANUAL_IN",
+          amount:
+            sale.totalAmount,
+          transactionDate:
+            collectionDate,
+          note:
+            `COD collection - ${sale.saleNumber}`,
+          createdById:
+            session.userId,
+        }
+      );
+
+      await recordAuditLog(
+        session,
+        {
+          action:
+            "COD_COLLECTED",
+          module:
+            "SALE",
+          recordId:
+            saleId,
+        },
+        tx
+      );
+
+      return updated;
+    }
+  );
+}
+
+// ============================================================
+// CREDIT PAYMENT COLLECTION
+// ============================================================
+
+export async function collectCreditPayment(
+  session: AuthSession,
+  saleId: string
+) {
+  assertPermission(
+    session,
+    PERMISSIONS.POS_USE
+  );
+
+  return prisma.$transaction(
+    async (tx) => {
+      const sale =
+        await tx.sale.findUnique({
+          where: {
+            id: saleId,
+          },
+        });
+
+      if (!sale) {
+        throw new NotFoundError(
+          "Sale not found."
+        );
+      }
+
+      if (
+        sale.status === "VOID"
+      ) {
+        throw new ValidationError(
+          "This sale has been voided and cannot receive payment."
+        );
+      }
+
+      if (
+        sale.paymentMethod !==
+        "CREDIT"
+      ) {
+        throw new ValidationError(
+          "This sale is not a credit sale."
+        );
+      }
+
+      if (!sale.customerId) {
+        throw new ValidationError(
+          "This credit sale has no customer."
+        );
+      }
+
+      const paymentTotals =
+        await tx.customerPayment.aggregate(
+          {
+            where: {
+              saleId:
+                sale.id,
+            },
+            _sum: {
+              amount:
+                true,
+            },
+          }
+        );
+
+      const alreadyPaid =
+        new Prisma.Decimal(
+          paymentTotals
+            ._sum.amount ?? 0
+        );
+
+      const outstanding =
+        new Prisma.Decimal(
+          sale.totalAmount
+        ).sub(
+          alreadyPaid
+        );
+
+      if (
+        outstanding.lte(0)
+      ) {
+        throw new ValidationError(
+          "This credit sale has already been fully paid."
+        );
+      }
+
+      const payment =
+        await tx.customerPayment.create(
+          {
+            data: {
+              customerId:
+                sale.customerId,
+              saleId:
+                sale.id,
+              amount:
+                outstanding,
+              method:
+                "CASH",
+              createdById:
+                session.userId,
+            },
+          }
+        );
+
+      await createCashTransactionOnce(
+        tx,
+        {
+          type:
+            "MANUAL_IN",
+          amount:
+            outstanding,
+          transactionDate:
+            payment.createdAt,
+          note:
+            `Credit payment - ${sale.saleNumber}`,
+          createdById:
+            session.userId,
+        }
+      );
+
+      const updated =
+        await tx.sale.update({
+          where: {
+            id: sale.id,
+          },
+          data: {
+            paymentStatus:
+              "PAID",
+          },
+        });
+
+      await recordAuditLog(
+        session,
+        {
+          action:
+            "CREDIT_PAYMENT_COLLECTED",
+          module:
+            "SALE",
+          recordId:
+            sale.id,
+          newValue: {
+            amount:
+              outstanding,
+            saleNumber:
+              sale.saleNumber,
+          },
+        },
+        tx
+      );
+
+      return updated;
+    }
+  );
+}
+
+// ============================================================
+// CASH MANAGEMENT RECONCILIATION
+// ============================================================
+
+export async function reconcileCashTransactions(
+  session: AuthSession,
+  from?: Date,
+  to?: Date
+) {
+  assertPermission(
+    session,
+    PERMISSIONS.EXPENSES_MANAGE
+  );
+
+  const sales =
+    await prisma.sale.findMany({
+      where: {
+        status: "COMPLETED",
+
+        ...(from || to
+          ? {
+              saleDate: {
+                ...(from
+                  ? { gte: from }
+                  : {}),
+                ...(to
+                  ? { lte: to }
+                  : {}),
+              },
+            }
+          : {}),
+      },
+
+      orderBy: {
+        saleDate: "asc",
+      },
+    });
+
+  if (sales.length === 0) {
+    return {
+      checked: 0,
+      created: 0,
+    };
+  }
+
+  const saleIds =
+    sales.map((sale) => sale.id);
+
+  const customerPayments =
+    await prisma.customerPayment.findMany({
+      where: {
+        saleId: {
+          in: saleIds,
+        },
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+    });
+
+  const paymentsBySale =
+    new Map<
+      string,
+      typeof customerPayments
+    >();
+
+  for (const payment of customerPayments) {
+    if (!payment.saleId) {
+      continue;
+    }
+
+    const existing =
+      paymentsBySale.get(
+        payment.saleId
+      ) ?? [];
+
+    existing.push(payment);
+
+    paymentsBySale.set(
+      payment.saleId,
+      existing
+    );
+  }
+
+  let created = 0;
+
+  for (const sale of sales) {
+    if (
+      sale.paymentMethod === "CASH" &&
+      sale.paymentStatus === "PAID" &&
+      sale.totalAmount.gt(0)
+    ) {
+      const note =
+        `Cash sale - ${sale.saleNumber}`;
+
+      const existing =
+        await prisma.cashTransaction.findFirst({
+          where: {
+            type: "MANUAL_IN",
+            amount:
+              sale.totalAmount,
+            note,
+          },
+        });
+
+      if (!existing) {
+        await prisma.cashTransaction.create({
+          data: {
+            type:
+              "MANUAL_IN",
+            amount:
+              sale.totalAmount,
+            transactionDate:
+              sale.saleDate,
+            note,
+            createdById:
+              sale.createdById ??
+              session.userId,
+          },
+        });
+
+        created++;
+      }
+    }
+
+    if (
+      sale.paymentMethod === "COD" &&
+      sale.paymentStatus === "PAID" &&
+      sale.totalAmount.gt(0)
+    ) {
+      const note =
+        `COD collection - ${sale.saleNumber}`;
+
+      const existing =
+        await prisma.cashTransaction.findFirst({
+          where: {
+            type: "MANUAL_IN",
+            amount:
+              sale.totalAmount,
+            note,
+          },
+        });
+
+      if (!existing) {
+        await prisma.cashTransaction.create({
+          data: {
+            type:
+              "MANUAL_IN",
+            amount:
+              sale.totalAmount,
+            transactionDate:
+              sale.codCollectedAt ??
+              sale.saleDate,
+            note,
+            createdById:
+              sale.codCollectedById ??
+              sale.createdById ??
+              session.userId,
+          },
+        });
+
+        created++;
+      }
+    }
+
+    if (
+      sale.paymentMethod === "CREDIT"
+    ) {
+      const payments =
+        paymentsBySale.get(
+          sale.id
+        ) ?? [];
+
+      for (const payment of payments) {
+        if (payment.amount.lte(0)) {
+          continue;
+        }
+
+        if (
+          payment.method !== "CASH" &&
+          payment.method !== "COD"
+        ) {
+          continue;
+        }
+
+        const note =
+          payment.method === "COD"
+            ? `COD collection - ${sale.saleNumber}`
+            : `Credit payment - ${sale.saleNumber}`;
+
+        const existing =
+          await prisma.cashTransaction.findFirst({
+            where: {
+              type:
+                "MANUAL_IN",
+              amount:
+                payment.amount,
+              note,
+              transactionDate:
+                payment.createdAt,
+            },
+          });
+
+        if (!existing) {
+          await prisma.cashTransaction.create({
+            data: {
+              type:
+                "MANUAL_IN",
+              amount:
+                payment.amount,
+              transactionDate:
+                payment.createdAt,
+              note,
+              createdById:
+                payment.createdById ??
+                sale.createdById ??
+                session.userId,
+            },
+          });
+
+          created++;
+        }
+      }
+    }
+  }
+
+  return {
+    checked:
+      sales.length,
+    created,
+  };
+}
+
+// ============================================================
+// VOID SALE
+// ============================================================
+
+export async function voidSale(
+  session: AuthSession,
+  saleId: string,
+  reason: string
+) {
+  assertPermission(
+    session,
+    PERMISSIONS.SALES_VOID
+  );
+
+  return prisma.$transaction(
+    async (tx) => {
+      const sale =
+        await tx.sale.findUnique({
+          where: {
+            id: saleId,
+          },
+          include: {
+            items: {
+              include: {
+                batchConsumptions:
+                  true,
+              },
+            },
+          },
+        });
+
+      if (!sale) {
+        throw new NotFoundError(
+          "Sale not found."
+        );
+      }
+
+      if (
+        sale.status === "VOID"
+      ) {
+        throw new ValidationError(
+          "This sale is already voided."
+        );
+      }
+
+      for (const item of sale.items) {
+        for (const consumption of item.batchConsumptions) {
+          const batch =
+            await tx.productBatch.findUniqueOrThrow(
+              {
+                where: {
+                  id:
+                    consumption.batchId,
+                },
+              }
+            );
+
+          const newRemaining =
+            new Prisma.Decimal(
+              batch.remainingQuantity
+            ).add(
+              consumption.quantityConsumed
+            );
+
+          await tx.productBatch.update({
+            where: {
+              id:
+                consumption.batchId,
+            },
+            data: {
+              remainingQuantity:
+                newRemaining,
+              status:
+                "ACTIVE",
+            },
+          });
+
+          await recordStockMovement(
+            tx,
+            {
+              productId:
+                item.productId,
+              batchId:
+                consumption.batchId,
+              movementType:
+                "ADJUSTMENT",
+              quantity:
+                consumption.quantityConsumed,
+              referenceType:
+                "SALE_VOID",
+              referenceId:
+                saleId,
+              userId:
+                session.userId,
+              notes:
+                `Sale ${sale.saleNumber} voided: ${reason}`,
+            }
+          );
+        }
+      }
+
+      const updated =
+        await tx.sale.update({
+          where: {
+            id:
+              saleId,
+          },
+          data: {
+            status:
+              "VOID",
+            voidReason:
+              reason,
+          },
+        });
+
+      await recordAuditLog(
+        session,
+        {
+          action:
+            "VOID",
+          module:
+            "SALE",
+          recordId:
+            saleId,
+          newValue: {
+            reason,
+          },
+        },
+        tx
+      );
+
+      return updated;
+    }
+  );
+}
+
+// ============================================================
+// GET SALE
+// ============================================================
+
+export async function getSaleWithDetails(
+  lookup: string
+) {
+  const key =
+    (lookup ?? "").trim();
+
+  if (!key) {
+    throw new NotFoundError(
+      "Sale not found."
+    );
+  }
+
+  const orderRef =
+    key.replace(
+      /^#+/,
+      ""
+    );
+
+  const phone =
+    normalizePhone(key);
+
+  const sale =
+    await prisma.sale.findFirst({
+      where: {
+        OR: [
+          {
+            id: key,
+          },
+          {
+            saleNumber:
+              key,
+          },
+          {
+            onlineOrderNumber:
+              key,
+          },
+          {
+            onlineOrderNumber:
+              `#${orderRef}`,
+          },
+          {
+            onlineOrderNumber:
+              orderRef,
+          },
+          ...(phone
+            ? [
+                {
+                  customer: {
+                    phone,
+                  },
+                },
+              ]
+            : []),
+        ],
+      },
+      include: {
+        customer:
+          true,
+        items: {
+          include: {
+            product:
+              true,
+          },
+        },
+        createdBy:
+          true,
+      },
+      orderBy: {
+        saleDate:
+          "desc",
+      },
+    });
+
+  if (!sale) {
+    throw new NotFoundError(
+      "Sale not found."
+    );
+  }
+
+  return sale;
+}
+
+// ============================================================
+// LIST SALES
+// ============================================================
+
+export async function listSales(
+  filters: {
+    from?: Date;
+    to?: Date;
+    paymentStatus?: string;
+  } = {}
+) {
+  return prisma.sale.findMany({
+    where: {
+      ...(filters.from ||
+      filters.to
+        ? {
+            saleDate: {
+              gte:
+                filters.from,
+              lte:
+                filters.to,
+            },
+          }
+        : {}),
+      ...(filters.paymentStatus
+        ? {
+            paymentStatus:
+              filters.paymentStatus as any,
+          }
+        : {}),
+    },
+    include: {
+      customer:
+        true,
+    },
+    orderBy: {
+      saleDate:
+        "desc",
+    },
+    take: 100,
+  });
+}

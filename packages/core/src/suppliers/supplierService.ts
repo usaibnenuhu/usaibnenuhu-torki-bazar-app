@@ -3,6 +3,7 @@ import { PERMISSIONS, NotFoundError, ValidationError } from "@torki-bazar/shared
 import type { AuthSession } from "../context";
 import { assertPermission } from "../context";
 import { recordAuditLog } from "../audit/auditService";
+import { enqueueSync } from "../sync/syncService";
 
 // Payable is always derived from transactions so no screen can disagree. Only
 // CREDIT returns offset it — a CASH_REFUND return is money back in hand. Credit
@@ -158,7 +159,29 @@ export async function createSupplier(session: AuthSession, input: SupplierFields
   assertPermission(session, PERMISSIONS.SUPPLIERS_MANAGE);
   if (!input.name?.trim()) throw new ValidationError("Supplier name is required.");
   if (!input.phone?.trim()) throw new ValidationError("Supplier phone number is required.");
-  const supplier = await prisma.supplier.create({ data: { ...input, name: input.name.trim(), phone: input.phone.trim() } });
+  const supplier = await prisma.supplier.create({
+    data: {
+      ...input,
+      name: input.name.trim(),
+      phone: input.phone.trim(),
+    },
+  });
+
+  await enqueueSync(
+    "SUPPLIER",
+    supplier.id,
+    "CREATE",
+    {
+      name: supplier.name,
+      company: supplier.company,
+      phone: supplier.phone,
+      email: supplier.email,
+      address: supplier.address,
+      notes: supplier.notes,
+      status: supplier.status,
+    }
+  );
+
   await recordAuditLog(session, { action: "CREATE", module: "SUPPLIER", recordId: supplier.id, newValue: supplier });
   return supplier;
 }
@@ -169,14 +192,52 @@ export async function updateSupplier(session: AuthSession, id: string, input: Pa
   if (!before) throw new NotFoundError("Supplier not found.");
   if (input.name !== undefined && !input.name.trim()) throw new ValidationError("Supplier name is required.");
   if (input.phone !== undefined && !input.phone.trim()) throw new ValidationError("Supplier phone number is required.");
-  const supplier = await prisma.supplier.update({ where: { id }, data: input });
+  const supplier = await prisma.supplier.update({
+    where: { id },
+    data: input,
+  });
+
+  await enqueueSync(
+    "SUPPLIER",
+    supplier.id,
+    "UPDATE",
+    {
+      name: supplier.name,
+      company: supplier.company,
+      phone: supplier.phone,
+      email: supplier.email,
+      address: supplier.address,
+      notes: supplier.notes,
+      status: supplier.status,
+    }
+  );
+
   await recordAuditLog(session, { action: "UPDATE", module: "SUPPLIER", recordId: id, previousValue: before, newValue: supplier });
   return supplier;
 }
 
 export async function archiveSupplier(session: AuthSession, id: string, isArchived = true) {
   assertPermission(session, PERMISSIONS.SUPPLIERS_MANAGE);
-  const supplier = await prisma.supplier.update({ where: { id }, data: { status: isArchived ? "ARCHIVED" : "ACTIVE" } });
+  const supplier = await prisma.supplier.update({
+    where: { id },
+    data: { status: isArchived ? "ARCHIVED" : "ACTIVE" },
+  });
+
+  await enqueueSync(
+    "SUPPLIER",
+    supplier.id,
+    "UPDATE",
+    {
+      name: supplier.name,
+      company: supplier.company,
+      phone: supplier.phone,
+      email: supplier.email,
+      address: supplier.address,
+      notes: supplier.notes,
+      status: supplier.status,
+    }
+  );
+
   await recordAuditLog(session, { action: isArchived ? "ARCHIVE" : "UNARCHIVE", module: "SUPPLIER", recordId: id });
   return supplier;
 }

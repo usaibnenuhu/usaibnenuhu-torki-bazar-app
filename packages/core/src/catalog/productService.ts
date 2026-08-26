@@ -9,6 +9,7 @@ import type { AuthSession } from "../context";
 import { assertPermission } from "../context";
 import { recordAuditLog } from "../audit/auditService";
 import { recordStockMovement } from "../inventory/inventoryService";
+import { enqueueSync } from "../sync/syncService";
 
 export interface ProductInput {
   name: string;
@@ -264,6 +265,33 @@ export async function createProduct(
         userId: session.userId,
         notes: "Opening stock entered on product creation.",
       });
+
+      await enqueueSync(
+        "PRODUCT",
+        created.id,
+        "CREATE",
+        {
+          name: created.name,
+          categoryId: created.categoryId,
+          subcategoryId: created.subcategoryId,
+          brandId: created.brandId,
+          sku: created.sku,
+          barcode: created.barcode,
+          unitId: created.unitId,
+          packSize: created.packSize,
+          expiryDate: created.expiryDate,
+          purchasePrice: created.purchasePrice,
+          sellingPrice: created.sellingPrice,
+          wholesalePrice: created.wholesalePrice,
+          minimumStock: created.minimumStock,
+          currentStock: created.currentStock,
+          description: created.description,
+          imageUrl: created.imageUrl,
+          status: created.status,
+          defaultSupplierId: created.defaultSupplierId,
+        },
+        tx
+      );
     }
 
     return tx.product.findUniqueOrThrow({
@@ -390,6 +418,32 @@ export async function updateProduct(
     },
   });
 
+  await enqueueSync(
+    "PRODUCT",
+    product.id,
+    "UPDATE",
+    {
+      name: product.name,
+      categoryId: product.categoryId,
+      subcategoryId: product.subcategoryId,
+      brandId: product.brandId,
+      sku: product.sku,
+      barcode: product.barcode,
+      unitId: product.unitId,
+      packSize: product.packSize,
+      expiryDate: product.expiryDate,
+      purchasePrice: product.purchasePrice,
+      sellingPrice: product.sellingPrice,
+      wholesalePrice: product.wholesalePrice,
+      minimumStock: product.minimumStock,
+      currentStock: product.currentStock,
+      description: product.description,
+      imageUrl: product.imageUrl,
+      status: product.status,
+      defaultSupplierId: product.defaultSupplierId,
+    }
+  );
+
   await recordAuditLog(session, {
     action: "UPDATE",
     module: "PRODUCT",
@@ -414,6 +468,32 @@ export async function archiveProduct(
       status: isArchived ? "ARCHIVED" : "ACTIVE",
     },
   });
+
+  await enqueueSync(
+    "PRODUCT",
+    product.id,
+    "UPDATE",
+    {
+      name: product.name,
+      categoryId: product.categoryId,
+      subcategoryId: product.subcategoryId,
+      brandId: product.brandId,
+      sku: product.sku,
+      barcode: product.barcode,
+      unitId: product.unitId,
+      packSize: product.packSize,
+      expiryDate: product.expiryDate,
+      purchasePrice: product.purchasePrice,
+      sellingPrice: product.sellingPrice,
+      wholesalePrice: product.wholesalePrice,
+      minimumStock: product.minimumStock,
+      currentStock: product.currentStock,
+      description: product.description,
+      imageUrl: product.imageUrl,
+      status: product.status,
+      defaultSupplierId: product.defaultSupplierId,
+    }
+  );
 
   await recordAuditLog(session, {
     action: isArchived ? "ARCHIVE" : "UNARCHIVE",

@@ -1,0 +1,36 @@
+{
+  "name": "torki-bazar-retail-management-system",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Torki Bazar Retail Management System - standalone, offline-first, database-driven retail management application.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "db:generate": "npm run generate --workspace=@torki-bazar/database",
+    "db:migrate": "npm run migrate:dev --workspace=@torki-bazar/database",
+    "db:seed": "npm run seed --workspace=@torki-bazar/database",
+    "build:packages": "npm run db:generate && npm run build --workspace=@torki-bazar/shared && npm run build --workspace=@torki-bazar/database && npm run build --workspace=@torki-bazar/core && npm run build --workspace=@torki-bazar/api && npm run build --workspace=@torki-bazar/desktop",
+    "dev": "npm run build:packages && npm run dev --workspace=@torki-bazar/desktop",
+    "build": "npm run build:packages && npm run build --workspace=@torki-bazar/api"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.2.0",
+    "typescript": "^5.6.3"
+  },
+  "allowScripts": {
+    "@prisma/client@5.22.0": true,
+    "prisma@5.22.0": true,
+    "@prisma/engines@5.22.0": true,
+    "electron@32.3.3": true,
+    "esbuild@0.21.5": true
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  }
+}

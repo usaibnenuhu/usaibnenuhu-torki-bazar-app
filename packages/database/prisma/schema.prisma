@@ -4,7 +4,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -290,6 +290,7 @@ model PurchaseItem {
 
 model SupplierPayment {
   id                   String    @id @default(cuid())
+  idempotencyKey        String?   @unique
   paymentNumber        String?   @unique
   supplierId           String
   purchaseId           String?

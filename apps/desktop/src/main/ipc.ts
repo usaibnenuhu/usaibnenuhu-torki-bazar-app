@@ -631,7 +631,7 @@ export function registerIpcHandlers() {
     async (input) =>
       core.createSale(
         requireSession(),
-        input
+        { ...input, source: "DESKTOP" }
       )
   );
 
@@ -959,8 +959,36 @@ export function registerIpcHandlers() {
 
   handle(
     "sync:run",
-    async () =>
-      core.syncPendingChanges()
+    async () => {
+      try {
+        // Electron/SQLite -> Neon
+        const pushed = await core.syncPendingChanges();
+
+        // Neon -> Electron/SQLite
+        const pulled = await core.pullRemoteChanges();
+
+        return {
+          ...pushed,
+          ...pulled,
+          error: null,
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.stack || error.message
+            : String(error);
+
+        console.error("SYNC ERROR:", message);
+
+        return {
+          pulled: 0,
+          synced: 0,
+          failed: 1,
+          pending: 0,
+          error: message,
+        };
+      }
+    }
   );
 
   // ============================================================
