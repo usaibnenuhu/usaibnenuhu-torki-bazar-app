@@ -14,10 +14,15 @@ export async function nextInvoiceNumber(
 
   const sequence = await tx.invoiceSequence.upsert({
     where: {
-      prefix_year: { prefix, year },
+      prefix_year: {
+        prefix,
+        year,
+      },
     },
     update: {
-      lastNumber: { increment: 1 },
+      lastNumber: {
+        increment: 1,
+      },
     },
     create: {
       prefix,
@@ -28,61 +33,26 @@ export async function nextInvoiceNumber(
 
   let number = sequence.lastNumber;
 
-  // ------------------------------------------------------------
-  // IMPORTANT:
-  // Keep the invoice sequence ahead of records that already exist.
-  //
-  // This is especially important for SALES because Electron and
-  // Neon can be synchronized/imported independently. In that case
-  // the InvoiceSequence can be behind the highest existing sale
-  // number and the next generated number would violate the unique
-  // constraint on Sale.saleNumber.
-  // ------------------------------------------------------------
-
+  /*
+   * SALES:
+   *
+   * Electron and Online POS use different prefixes:
+   *
+   *   TB-DES-2026-000001
+   *   TB-ONL-2026-000001
+   *   TB-SALE-2026-000001 (legacy)
+   *
+   * The database may already contain sales while InvoiceSequence
+   * is behind, so never return an already-existing saleNumber.
+   */
   if (
     prefix === INVOICE_PREFIXES.SALE ||
     prefix === INVOICE_PREFIXES.SALE_ONLINE ||
     prefix === INVOICE_PREFIXES.SALE_DESKTOP
   ) {
-    // Keep the sequence ahead of every existing sale, including
-    // sales imported from another database/device.
-    const sales = await tx.sale.findMany({
-      where: {
-        saleNumber: {
-          startsWith: `${prefix}-${year}-`,
-        },
-      },
-      select: {
-        saleNumber: true,
-      },
-      orderBy: {
-        saleNumber: "desc",
-      },
-      take: 1,
-    });
-
-    const latestSaleNumber = sales[0]?.saleNumber;
-    const match = latestSaleNumber?.match(/(\d+)$/);
-    const existingMax = match ? Number(match[1]) : 0;
-
-    if (number <= existingMax) {
-      number = existingMax + 1;
-
-      await tx.invoiceSequence.update({
-        where: {
-          prefix_year: { prefix, year },
-        },
-        data: {
-          lastNumber: number,
-        },
-      });
-    }
-
-    // Extra collision protection.
-    // If another transaction/import has already occupied the candidate,
-    // keep advancing until the candidate is unused.
     while (true) {
-      const candidate = `${prefix}-${year}-${String(number).padStart(6, "0")}`;
+      const candidate =
+        `${prefix}-${year}-${String(number).padStart(6, "0")}`;
 
       const existingSale = await tx.sale.findUnique({
         where: {
@@ -101,7 +71,10 @@ export async function nextInvoiceNumber(
 
       await tx.invoiceSequence.update({
         where: {
-          prefix_year: { prefix, year },
+          prefix_year: {
+            prefix,
+            year,
+          },
         },
         data: {
           lastNumber: number,
@@ -110,25 +83,35 @@ export async function nextInvoiceNumber(
     }
   }
 
-  // Supplier payments do not use a year.
-  // Make sure the sequence is never behind an existing payment.
-  if (prefix === "SP" && !withYear) {
-    const payments = await tx.supplierPayment.findMany({
-      select: { paymentNumber: true },
-      orderBy: { paymentNumber: "desc" },
-      take: 1,
-    });
+  /*
+   * Supplier payments do not use a year.
+   */
+  if (prefix === INVOICE_PREFIXES.SUPPLIER_PAYMENT && !withYear) {
+    while (true) {
+      const candidate =
+        `${prefix}-${String(number).padStart(6, "0")}`;
 
-    const latest = payments[0]?.paymentNumber;
-    const match = latest?.match(/(\d+)$/);
-    const existingMax = match ? Number(match[1]) : 0;
+      const existingPayment = await tx.supplierPayment.findUnique({
+        where: {
+          paymentNumber: candidate,
+        },
+        select: {
+          id: true,
+        },
+      });
 
-    if (number <= existingMax) {
-      number = existingMax + 1;
+      if (!existingPayment) {
+        break;
+      }
+
+      number += 1;
 
       await tx.invoiceSequence.update({
         where: {
-          prefix_year: { prefix, year },
+          prefix_year: {
+            prefix,
+            year,
+          },
         },
         data: {
           lastNumber: number,
