@@ -1,24 +1,145 @@
 import { prisma } from "@torki-bazar/database";
-import type { InvoicePrefix } from "@torki-bazar/shared";
+import {
+  INVOICE_PREFIXES,
+  type InvoicePrefix,
+} from "@torki-bazar/shared";
 
-// Generates numbers like TB-SALE-2026-000001 or TB-MEM-000001 (no year).
-// Uses an atomic increment inside the caller's transaction to avoid
-// duplicate numbers under concurrent operations.
 export async function nextInvoiceNumber(
   tx: typeof prisma,
   prefix: InvoicePrefix,
   opts: { withYear?: boolean } = { withYear: true }
 ): Promise<string> {
   const withYear = opts.withYear !== false;
-  const year = withYear ? new Date().getFullYear() : 0; // 0 = no year component
+  const year = withYear ? new Date().getFullYear() : 0;
 
   const sequence = await tx.invoiceSequence.upsert({
-    where: { prefix_year: { prefix, year } },
-    update: { lastNumber: { increment: 1 } },
-    create: { prefix, year, lastNumber: 1 },
+    where: {
+      prefix_year: { prefix, year },
+    },
+    update: {
+      lastNumber: { increment: 1 },
+    },
+    create: {
+      prefix,
+      year,
+      lastNumber: 1,
+    },
   });
 
-  const number = withYear ? sequence.lastNumber : sequence.lastNumber;
+  let number = sequence.lastNumber;
+
+  // ------------------------------------------------------------
+  // IMPORTANT:
+  // Keep the invoice sequence ahead of records that already exist.
+  //
+  // This is especially important for SALES because Electron and
+  // Neon can be synchronized/imported independently. In that case
+  // the InvoiceSequence can be behind the highest existing sale
+  // number and the next generated number would violate the unique
+  // constraint on Sale.saleNumber.
+  // ------------------------------------------------------------
+
+  if (
+    prefix === INVOICE_PREFIXES.SALE ||
+    prefix === INVOICE_PREFIXES.SALE_ONLINE ||
+    prefix === INVOICE_PREFIXES.SALE_DESKTOP
+  ) {
+    // Keep the sequence ahead of every existing sale, including
+    // sales imported from another database/device.
+    const sales = await tx.sale.findMany({
+      where: {
+        saleNumber: {
+          startsWith: `${prefix}-${year}-`,
+        },
+      },
+      select: {
+        saleNumber: true,
+      },
+      orderBy: {
+        saleNumber: "desc",
+      },
+      take: 1,
+    });
+
+    const latestSaleNumber = sales[0]?.saleNumber;
+    const match = latestSaleNumber?.match(/(\d+)$/);
+    const existingMax = match ? Number(match[1]) : 0;
+
+    if (number <= existingMax) {
+      number = existingMax + 1;
+
+      await tx.invoiceSequence.update({
+        where: {
+          prefix_year: { prefix, year },
+        },
+        data: {
+          lastNumber: number,
+        },
+      });
+    }
+
+    // Extra collision protection.
+    // If another transaction/import has already occupied the candidate,
+    // keep advancing until the candidate is unused.
+    while (true) {
+      const candidate = `${prefix}-${year}-${String(number).padStart(6, "0")}`;
+
+      const existingSale = await tx.sale.findUnique({
+        where: {
+          saleNumber: candidate,
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (!existingSale) {
+        break;
+      }
+
+      number += 1;
+
+      await tx.invoiceSequence.update({
+        where: {
+          prefix_year: { prefix, year },
+        },
+        data: {
+          lastNumber: number,
+        },
+      });
+    }
+  }
+
+  // Supplier payments do not use a year.
+  // Make sure the sequence is never behind an existing payment.
+  if (prefix === "SP" && !withYear) {
+    const payments = await tx.supplierPayment.findMany({
+      select: { paymentNumber: true },
+      orderBy: { paymentNumber: "desc" },
+      take: 1,
+    });
+
+    const latest = payments[0]?.paymentNumber;
+    const match = latest?.match(/(\d+)$/);
+    const existingMax = match ? Number(match[1]) : 0;
+
+    if (number <= existingMax) {
+      number = existingMax + 1;
+
+      await tx.invoiceSequence.update({
+        where: {
+          prefix_year: { prefix, year },
+        },
+        data: {
+          lastNumber: number,
+        },
+      });
+    }
+  }
+
   const padded = String(number).padStart(6, "0");
-  return withYear ? `${prefix}-${year}-${padded}` : `${prefix}-${padded}`;
+
+  return withYear
+    ? `${prefix}-${year}-${padded}`
+    : `${prefix}-${padded}`;
 }

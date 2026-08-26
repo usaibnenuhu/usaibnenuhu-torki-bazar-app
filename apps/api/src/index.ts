@@ -440,7 +440,7 @@ async function startServer() {
     // ==========================================================
 
     if (channel === "sales:create")
-      return core.createSale(session, payload);
+      return core.createSale(session, { ...payload, source: "ONLINE" });
 
     if (channel === "sales:markCodCollected")
       return core.markCodCollected(session, payload.id, payload);
@@ -653,7 +653,12 @@ async function startServer() {
         data,
       });
     } catch (error: any) {
-      console.error(`[WEB RPC:${req.body?.channel}]`, error);
+      console.error(
+        `[WEB RPC:${req.body?.channel}]`,
+        error?.name ?? "ERROR",
+        error?.code ?? "",
+        error?.message ?? error
+      );
 
       const message =
         error?.message ??

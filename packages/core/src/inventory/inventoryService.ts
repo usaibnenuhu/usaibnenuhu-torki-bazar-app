@@ -29,10 +29,23 @@ async function applyProductStockDelta(
 
   const newStock = new Prisma.Decimal(product.currentStock).add(delta);
 
-  await tx.product.update({
+  const updatedProduct = await tx.product.update({
     where: { id: productId },
     data: { currentStock: newStock },
   });
+
+  // The Product itself changed, so it MUST be queued for Neon.
+  // syncProduct() will read the complete product from the local DB
+  // and upsert it into Neon.
+  await enqueueSync(
+    "PRODUCT",
+    updatedProduct.id,
+    "UPDATE",
+    {
+      id: updatedProduct.id,
+    },
+    tx
+  );
 
   return {
     previousQuantity: new Prisma.Decimal(product.currentStock),
@@ -200,6 +213,7 @@ export async function consumeFifo(
     userId: string;
     referenceType: string;
     referenceId: string;
+    enqueueBatchSync?: boolean;
   }
 ): Promise<BatchConsumption[]> {
   let remaining = new Prisma.Decimal(params.quantity);
@@ -243,6 +257,7 @@ export async function consumeFifo(
       },
     });
 
+      if (params.enqueueBatchSync !== false) {
       await enqueueSync(
         "PRODUCT_BATCH",
         batch.id,
@@ -266,6 +281,7 @@ export async function consumeFifo(
         },
         tx
       );
+    }
 
     await recordStockMovement(tx, {
       productId: params.productId,
