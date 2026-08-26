@@ -4,6 +4,17 @@ import {
   type InvoicePrefix,
 } from "@torki-bazar/shared";
 
+/**
+ * Generate the next invoice/reference number safely.
+ *
+ * PostgreSQL advisory transaction locks make number generation
+ * single-file for the same prefix/year, even when:
+ *
+ * - Online POS and Electron POS submit simultaneously
+ * - multiple browser tabs submit simultaneously
+ * - Railway has multiple API requests running concurrently
+ * - InvoiceSequence is behind existing records
+ */
 export async function nextInvoiceNumber(
   tx: typeof prisma,
   prefix: InvoicePrefix,
@@ -12,6 +23,25 @@ export async function nextInvoiceNumber(
   const withYear = opts.withYear !== false;
   const year = withYear ? new Date().getFullYear() : 0;
 
+  /*
+   * IMPORTANT:
+   * Hold a PostgreSQL transaction-level advisory lock for this
+   * exact prefix/year until the surrounding Prisma transaction ends.
+   *
+   * hashtextextended() converts the prefix/year into a stable bigint
+   * lock key. Different prefixes can operate independently.
+   */
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(${`${prefix}:${year}`}, 0)
+    )
+  `;
+
+  /*
+   * Now that this prefix/year is locked, no other transaction can
+   * generate a number for the same prefix/year until this transaction
+   * finishes.
+   */
   const sequence = await tx.invoiceSequence.upsert({
     where: {
       prefix_year: {
@@ -34,16 +64,12 @@ export async function nextInvoiceNumber(
   let number = sequence.lastNumber;
 
   /*
-   * SALES:
+   * SALES
    *
-   * Electron and Online POS use different prefixes:
+   * Never return a sale number that already exists.
    *
-   *   TB-DES-2026-000001
-   *   TB-ONL-2026-000001
-   *   TB-SALE-2026-000001 (legacy)
-   *
-   * The database may already contain sales while InvoiceSequence
-   * is behind, so never return an already-existing saleNumber.
+   * This also handles databases where InvoiceSequence was behind
+   * because records were imported/synchronized previously.
    */
   if (
     prefix === INVOICE_PREFIXES.SALE ||
@@ -86,19 +112,23 @@ export async function nextInvoiceNumber(
   /*
    * Supplier payments do not use a year.
    */
-  if (prefix === INVOICE_PREFIXES.SUPPLIER_PAYMENT && !withYear) {
+  if (
+    prefix === INVOICE_PREFIXES.SUPPLIER_PAYMENT &&
+    !withYear
+  ) {
     while (true) {
       const candidate =
         `${prefix}-${String(number).padStart(6, "0")}`;
 
-      const existingPayment = await tx.supplierPayment.findUnique({
-        where: {
-          paymentNumber: candidate,
-        },
-        select: {
-          id: true,
-        },
-      });
+      const existingPayment =
+        await tx.supplierPayment.findUnique({
+          where: {
+            paymentNumber: candidate,
+          },
+          select: {
+            id: true,
+          },
+        });
 
       if (!existingPayment) {
         break;
