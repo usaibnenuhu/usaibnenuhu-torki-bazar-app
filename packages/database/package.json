@@ -5,8 +5,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "prisma generate && tsc -p tsconfig.json",
-    "generate": "prisma generate",
+    "build": "node scripts/generate-client.js && tsc -p tsconfig.json",
+    "generate": "node scripts/generate-client.js",
     "migrate:dev": "prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
     "seed": "ts-node --transpile-only src/seed.ts",
