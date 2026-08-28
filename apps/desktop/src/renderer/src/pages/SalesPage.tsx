@@ -6,7 +6,7 @@ import { DataTable } from "../components/DataTable";
 import { formatBDT, formatDateTime } from "../utils/format";
 import { useToastStore } from "../store/toastStore";
 
-import logo from "../assets/torki-logo.png";
+import logo from "../assets/torki-bazar-logo.png";
 
 interface Sale {
   id: string;

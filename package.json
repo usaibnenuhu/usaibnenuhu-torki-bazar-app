@@ -20,6 +20,8 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^26.2.0",
+    "electron-builder": "^26.15.3",
+    "png-to-ico": "^3.0.2",
     "typescript": "^5.6.3"
   },
   "allowScripts": {
@@ -32,6 +34,7 @@
   "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
+    "electron-updater": "^6.8.9",
     "express": "^5.2.1"
   }
 }

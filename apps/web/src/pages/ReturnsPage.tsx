@@ -48,6 +48,7 @@ export function ReturnsPage() {
   
   const [returnsList, setReturnsList] = useState<ReturnRecord[]>([]);
   const [dateFilter, setDateFilter] = useState<"today" | "week" | "month" | "all">("all");
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const push = useToastStore((s) => s.push);
 
   async function fetchReturns() {
@@ -89,23 +90,40 @@ export function ReturnsPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+
+    // Prevent duplicate/concurrent return requests.
+    if (isSubmitting) return;
     if (!sale) return;
+
     const items = Object.entries(selections)
       .filter(([, v]) => Number(v.quantity) > 0)
       .map(([saleItemId, v]) => ({ saleItemId, quantity: Number(v.quantity), condition: v.condition }));
+
     if (items.length === 0) {
       push("Select at least one item and quantity to return.", "error");
       return;
     }
+
+    setIsSubmitting(true);
+
     try {
       await call("returns:create", { saleId: sale.id, items, reason });
+
       push("Return recorded and inventory updated.", "success");
+
       setSale(null);
       setSaleId("");
+      setSelections({});
       setReason("");
-      fetchReturns();
+
+      await fetchReturns();
     } catch (err) {
-      push(err instanceof Error ? err.message : "Failed to create return", "error");
+      push(
+        err instanceof Error ? err.message : "Failed to create return",
+        "error"
+      );
+    } finally {
+      setIsSubmitting(false);
     }
   }
 
@@ -188,8 +206,12 @@ export function ReturnsPage() {
             <Field label="Reason">
               <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason for return..." />
             </Field>
-            <Button type="submit" className="w-full">
-              Process Return & Refund
+            <Button
+              type="submit"
+              className="w-full"
+              disabled={isSubmitting}
+            >
+              {isSubmitting ? "Processing Return..." : "Process Return & Refund"}
             </Button>
           </form>
         </Card>

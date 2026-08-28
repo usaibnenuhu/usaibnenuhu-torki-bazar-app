@@ -7,7 +7,7 @@ import { Field, Input, Select } from "../components/Form";
 import { Modal } from "../components/Modal";
 import { formatBDT, formatDate } from "../utils/format";
 import { useToastStore } from "../store/toastStore";
-import logo from "../assets/torki-logo.png";
+import logo from "../assets/torki-bazar-logo.png";
 
 interface Supplier {
   id: string;

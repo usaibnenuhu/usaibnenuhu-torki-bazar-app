@@ -29,7 +29,10 @@ function handle(channel: string, fn: Handler) {
       return {
         ok: false as const,
         code: "UNKNOWN",
-        message: "Something went wrong. Please try again.",
+        message:
+          error instanceof Error
+            ? error.message
+            : String(error),
       };
     }
   });
