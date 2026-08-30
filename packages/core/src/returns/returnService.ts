@@ -6,7 +6,6 @@ import { recordAuditLog } from "../audit/auditService";
 import { nextInvoiceNumber } from "../invoicing/invoiceNumberService";
 import { recordStockMovement } from "../inventory/inventoryService";
 import { recordBkashReturnOutflow } from "../bKash/bkashService";
-import { enqueueSync } from "../sync/syncService";
 
 export interface ReturnItemInput {
   saleItemId: string;
@@ -193,24 +192,7 @@ export async function createReturn(session: AuthSession, input: CreateReturnInpu
       tx
     );
 
-    // ------------------------------------------------------------
-    // CUSTOMER RETURN -> ELECTRON -> NEON SYNC
-    //
-    // Queue the complete return after the return header and all
-    // ReturnItems have been created inside the same transaction.
-    // ------------------------------------------------------------
-    await enqueueSync(
-      "RETURN",
-      returnRecord.id,
-      "CREATE",
-      { id: returnRecord.id },
-      tx
-    );
-
     return updatedReturn;
-  }, {
-    maxWait: 10000,
-    timeout: 30000,
   });
 }
 

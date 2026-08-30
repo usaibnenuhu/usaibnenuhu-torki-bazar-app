@@ -440,7 +440,7 @@ async function startServer() {
     // ==========================================================
 
     if (channel === "sales:create")
-      return core.createSale(session, { ...payload, source: "ONLINE" });
+      return core.createSale(session, payload);
 
     if (channel === "sales:markCodCollected")
       return core.markCodCollected(session, payload.id, payload);

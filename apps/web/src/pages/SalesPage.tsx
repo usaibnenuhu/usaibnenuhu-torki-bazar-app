@@ -41,13 +41,6 @@ interface Sale {
 
 const DASH = "—";
 
-function getSaleSource(saleNumber: string) {
-  if (saleNumber.startsWith("TB-ONL-")) return "ONLINE";
-  if (saleNumber.startsWith("TB-DES-")) return "DESKTOP";
-  return "LEGACY";
-}
-
-
 /* ----------------------------------------------------------------------- */
 /*  LINE-STYLE ICONS (presentational only)                                  */
 /* ----------------------------------------------------------------------- */
@@ -735,19 +728,11 @@ export function SalesPage() {
               columns={[
                 {
                   header: "Sale #",
-                  accessor: (s) => {
-                    const source = getSaleSource(s.saleNumber);
-                    return (
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs font-bold text-slate-700">
-                          {s.saleNumber}
-                        </span>
-                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-black text-slate-600">
-                          {source}
-                        </span>
-                      </div>
-                    );
-                  },
+                  accessor: (s) => (
+                    <span className="font-mono text-xs font-bold text-slate-700">
+                      {s.saleNumber}
+                    </span>
+                  ),
                 },
 
                 {

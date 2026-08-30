@@ -4,6 +4,12 @@ import fs from "node:fs";
 
 const isDev = !app.isPackaged;
 
+/**
+ * Local SQLite database path.
+ *
+ * This is kept only for development/fallback purposes.
+ * Production will use DATABASE_URL from the environment.
+ */
 function resolveDatabasePath(): string {
   const userDataDir = app.getPath("userData");
 
@@ -11,298 +17,147 @@ function resolveDatabasePath(): string {
     recursive: true,
   });
 
-  return path.join(userDataDir, "torki-bazar.db");
-}
-
-function initializeProductionDatabase(): string {
-  const databasePath = resolveDatabasePath();
-
-  const templatePath = path.join(
-    process.resourcesPath,
-    "database",
-    "torki-bazar-template.db"
+  return path.join(
+    userDataDir,
+    "torki-bazar.db"
   );
-
-  if (!fs.existsSync(templatePath)) {
-    throw new Error(
-      `Production database template is missing: ${templatePath}`
-    );
-  }
-
-  /*
-   * A packaged Windows installation may already have created
-   * torki-bazar.db before the database template was available.
-   *
-   * Do NOT blindly accept an existing database. Verify that it
-   * contains the Prisma User table required for login.
-   */
-
-  if (fs.existsSync(databasePath)) {
-    const header = Buffer.alloc(100);
-
-    let hasValidSQLiteHeader = false;
-
-    try {
-      const fd = fs.openSync(databasePath, "r");
-
-      try {
-        fs.readSync(fd, header, 0, 100, 0);
-      } finally {
-        fs.closeSync(fd);
-      }
-
-      hasValidSQLiteHeader =
-        header.subarray(0, 16).toString("utf8") ===
-        "SQLite format 3\u0000";
-    } catch (error) {
-      console.error(
-        "[main] Could not inspect existing database:",
-        error
-      );
-    }
-
-    if (hasValidSQLiteHeader) {
-      /*
-       * SQLite schema text is stored inside the database.
-       * Check for the Prisma User table before accepting it.
-       */
-      let databaseText = "";
-
-      try {
-        databaseText = fs.readFileSync(
-          databasePath,
-          "latin1"
-        );
-      } catch (error) {
-        console.error(
-          "[main] Could not read existing database:",
-          error
-        );
-      }
-
-      const hasUserTable =
-        databaseText.includes("CREATE TABLE User") ||
-        databaseText.includes("CREATE TABLE \"User\"") ||
-        databaseText.includes("CREATE TABLE main.User") ||
-        databaseText.includes("CREATE TABLE \"main\".\"User\"");
-
-      /*
-       * Check sellingPrice specifically inside ProductBatch.
-       *
-       * Do not search the entire SQLite database for "sellingPrice",
-       * because Product also has a sellingPrice column.
-       */
-      const productBatchTableMatch = databaseText.match(
-        /CREATE TABLE\s+(?:"main"\.)?"ProductBatch"\s*\((.*?)\)\s*(?:;|$)/is
-      );
-
-      const hasProductBatchSellingPrice =
-        !!productBatchTableMatch &&
-        /"sellingPrice"\s+(?:DECIMAL|NUMERIC|REAL)/i.test(
-          productBatchTableMatch[1]
-        );
-
-      if (hasUserTable && hasProductBatchSellingPrice) {
-        console.log(
-          `[main] Existing valid local database found: ${databasePath}`
-        );
-
-        return databasePath;
-      }
-
-      if (!hasUserTable) {
-        console.warn(
-          "[main] Existing local database is missing the User table."
-        );
-      }
-
-      if (!hasProductBatchSellingPrice) {
-        console.warn(
-          "[main] Existing local database is missing ProductBatch.sellingPrice."
-        );
-      }
-    } else {
-      console.warn(
-        "[main] Existing local database is not a valid SQLite database."
-      );
-    }
-
-    /*
-     * Keep the broken database as a backup before replacing it.
-     */
-    const backupPath =
-      `${databasePath}.invalid-${Date.now()}`;
-
-    try {
-      fs.renameSync(
-        databasePath,
-        backupPath
-      );
-
-      console.log(
-        `[main] Invalid database moved to: ${backupPath}`
-      );
-    } catch (error) {
-      throw new Error(
-        `Existing local database is invalid and could not be moved: ${String(error)}`
-      );
-    }
-  }
-
-  fs.copyFileSync(
-    templatePath,
-    databasePath
-  );
-
-  console.log(
-    `[main] Initialized local database from template: ${databasePath}`
-  );
-
-  return databasePath;
-}
-
-function loadDevelopmentNeonUrl() {
-  if (process.env.NEON_DATABASE_URL) return;
-
-  const databaseEnvPath = path.resolve(
-    __dirname,
-    "../../../../apps/api/.env"
-  );
-
-  if (!fs.existsSync(databaseEnvPath)) return;
-
-  const envFile = fs.readFileSync(databaseEnvPath, "utf8");
-
-  const match = envFile.match(
-    /^NEON_DATABASE_URL=(?:"([^"]+)"|'([^']+)'|([^\n]+))$/m
-  );
-
-  process.env.NEON_DATABASE_URL =
-    match?.[1] ??
-    match?.[2] ??
-    match?.[3]?.trim();
 }
 
 async function bootstrap() {
   /*
-   * Torki Bazar is offline-first.
+   * DATABASE CONFIGURATION
    *
-   * Both development and packaged Windows installations
-   * use a local SQLite database.
+   * DEVELOPMENT:
+   * Electron uses the project's local SQLite database:
    *
-   * Neon is used by the sync engine for cloud synchronization.
+   * packages/database/prisma/dev.db
+   *
+   * PRODUCTION:
+   * Electron MUST receive DATABASE_URL from the
+   * environment. This will be your Neon PostgreSQL
+   * connection.
+   *
+   * We intentionally do NOT hard-code the Neon
+   * username/password in this source file.
    */
 
-  const localDatabasePath = isDev
-    ? path.resolve(
-        __dirname,
-        "../../../../packages/database/prisma/dev.db"
-      )
-    : initializeProductionDatabase();
-
-  process.env.DATABASE_URL ||= `file:${localDatabasePath}`;
-
   if (isDev) {
-    loadDevelopmentNeonUrl();
+    process.env.DATABASE_URL ||= `file:${path.resolve(
+      __dirname,
+      "../../../../packages/database/prisma/dev.db"
+    )}`;
+
+    /*
+     * Load the Neon connection string during development.
+     *
+     * The local SQLite database remains the primary/local DB.
+     * NEON_DATABASE_URL is used only by the sync engine to
+     * upload pending changes to Neon.
+     */
+    if (!process.env.NEON_DATABASE_URL) {
+      const databaseEnvPath = path.resolve(
+        __dirname,
+        "../../../../apps/api/.env"
+      );
+
+      if (fs.existsSync(databaseEnvPath)) {
+        const envFile = fs.readFileSync(
+          databaseEnvPath,
+          "utf8"
+        );
+
+        const match = envFile.match(
+          /^NEON_DATABASE_URL=(?:"([^"]+)"|'([^']+)'|([^\n]+))$/m
+        );
+
+        process.env.NEON_DATABASE_URL =
+          match?.[1] ??
+          match?.[2] ??
+          match?.[3]?.trim();
+      }
+    }
 
     if (!process.env.NEON_DATABASE_URL) {
-      console.error("[main] NEON_DATABASE_URL is not configured.");
+      console.error(
+        "[main] NEON_DATABASE_URL is not configured."
+      );
 
       dialog.showErrorBox(
         "Neon sync configuration missing",
-        "NEON_DATABASE_URL could not be loaded.\n\nPlease configure it in apps/api/.env."
+        "NEON_DATABASE_URL could not be loaded.\n\nPlease configure it in packages/database/.env."
       );
 
       app.quit();
       return;
     }
+
+    console.log(
+      "[main] Local SQLite configured."
+    );
+
+    console.log(
+      "[main] Neon sync database configured."
+    );
+  } else {
+    // PRODUCTION:
+    // Use a writable per-user SQLite database.
+    // Never put the database inside the installed application directory.
+    const productionDatabasePath = resolveDatabasePath();
+
+    process.env.DATABASE_URL = `file:${productionDatabasePath}`;
+
+    console.log(
+      `[main] Production SQLite configured: ${productionDatabasePath}`
+    );
+
+    // Neon is used for online synchronization.
+    // It is loaded from the environment/configuration available to the app.
+    if (!process.env.NEON_DATABASE_URL) {
+      console.warn(
+        "[main] NEON_DATABASE_URL is not configured. Local/offline mode will still work, but Neon sync is unavailable."
+      );
+    }
   }
 
+  /*
+   * Set NODE_ENV before importing the database/core
+   * layer because Prisma is initialized there.
+   */
   process.env.NODE_ENV ||= isDev
     ? "development"
     : "production";
 
-  console.log(
-    `[main] Local SQLite configured: ${localDatabasePath}`
-  );
-
-  if (process.env.NEON_DATABASE_URL) {
-    console.log("[main] Neon sync database configured.");
-  } else {
-    console.log(
-      "[main] Neon URL is not exposed to the desktop process at startup."
-    );
-  }
-
+  /*
+   * IMPORTANT:
+   *
+   * Do not import ./ipc at the top of this file.
+   *
+   * We intentionally import it only AFTER DATABASE_URL
+   * has been configured.
+   *
+   * This guarantees that the PrismaClient singleton
+   * sees the correct DATABASE_URL when it is created.
+   */
   const { registerIpcHandlers } =
     await import("./ipc");
 
   registerIpcHandlers();
 
   createWindow();
-
-  if (!isDev && process.platform === "win32") {
-    setupAutoUpdater();
-  }
-}
-
-async function setupAutoUpdater() {
-  try {
-    const { autoUpdater } =
-      await import("electron-updater");
-
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
-
-    autoUpdater.on("checking-for-update", () => {
-      console.log("[updater] Checking for updates...");
-    });
-
-    autoUpdater.on("update-available", (info) => {
-      console.log(
-        `[updater] Update available: ${info.version}`
-      );
-    });
-
-    autoUpdater.on("update-not-available", () => {
-      console.log("[updater] Application is up to date.");
-    });
-
-    autoUpdater.on("download-progress", (progress) => {
-      console.log(
-        `[updater] Download progress: ${Math.round(
-          progress.percent
-        )}%`
-      );
-    });
-
-    autoUpdater.on("update-downloaded", (info) => {
-      console.log(
-        `[updater] Update downloaded: ${info.version}. It will install when the application exits.`
-      );
-    });
-
-    autoUpdater.on("error", (error) => {
-      console.error("[updater] Update error:", error);
-    });
-
-    await autoUpdater.checkForUpdates();
-  } catch (error) {
-    console.error(
-      "[updater] Failed to initialize updater:",
-      error
-    );
-  }
 }
 
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
+
     minWidth: 1100,
     minHeight: 700,
+
     show: false,
+
     autoHideMenuBar: true,
+
     backgroundColor: "#f4faf6",
 
     webPreferences: {
@@ -310,24 +165,45 @@ function createWindow() {
         __dirname,
         "../preload/index.js"
       ),
+
       contextIsolation: true,
+
       nodeIntegration: false,
+
       sandbox: true,
     },
   });
 
-  win.once("ready-to-show", () => {
-    win.show();
-  });
+  /*
+   * Wait until the renderer is ready before showing
+   * the window.
+   */
+  win.once(
+    "ready-to-show",
+    () => {
+      win.show();
+    }
+  );
 
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+  /*
+   * Open external links in the user's default browser.
+   */
+  win.webContents.setWindowOpenHandler(
+    ({ url }) => {
+      shell.openExternal(url);
 
-    return {
-      action: "deny",
-    };
-  });
+      return {
+        action: "deny",
+      };
+    }
+  );
 
+  /*
+   * Development diagnostics.
+   *
+   * These are intentionally enabled only during
+   * development.
+   */
   if (isDev) {
     win.webContents.on(
       "console-message",
@@ -359,6 +235,15 @@ function createWindow() {
     );
   }
 
+  /*
+   * Development:
+   *
+   * electron-vite gives us ELECTRON_RENDERER_URL.
+   *
+   * Production:
+   *
+   * Load the bundled renderer HTML.
+   */
   if (
     isDev &&
     process.env["ELECTRON_RENDERER_URL"]
@@ -376,6 +261,9 @@ function createWindow() {
   }
 }
 
+/*
+ * Start Electron only after Electron itself is ready.
+ */
 app.whenReady()
   .then(bootstrap)
   .catch((error) => {
@@ -395,6 +283,11 @@ app.whenReady()
     app.quit();
   });
 
+/*
+ * macOS:
+ * Keep the application running while the app is
+ * still active.
+ */
 app.on(
   "window-all-closed",
   () => {
@@ -404,6 +297,11 @@ app.on(
   }
 );
 
+/*
+ * macOS:
+ * Re-create the window when the dock icon is clicked
+ * and no windows are currently open.
+ */
 app.on(
   "activate",
   () => {

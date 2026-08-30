@@ -4,6 +4,12 @@ import { AppError } from "@torki-bazar/shared";
 import * as core from "@torki-bazar/core";
 import { getSession, requireSession, setSession } from "./session";
 import { serialize } from "./serialize";
+import {
+  checkForDesktopUpdate,
+  downloadDesktopUpdate,
+  installDesktopUpdate,
+  getDesktopUpdateState,
+} from "./updater";
 
 type Handler = (payload: any) => Promise<unknown>;
 
@@ -29,16 +35,32 @@ function handle(channel: string, fn: Handler) {
       return {
         ok: false as const,
         code: "UNKNOWN",
-        message:
-          error instanceof Error
-            ? error.message
-            : String(error),
+        message: "Something went wrong. Please try again.",
       };
     }
   });
 }
 
 export function registerIpcHandlers() {
+  // ============================================================
+  // APPLICATION / UPDATES
+  // ============================================================
+
+  handle("app:version", async () => ({
+    version: app.getVersion(),
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+  }));
+
+  handle("app:update:state", async () => getDesktopUpdateState());
+
+  handle("app:update:check", async () => checkForDesktopUpdate());
+
+  handle("app:update:download", async () => downloadDesktopUpdate());
+
+  handle("app:update:install", async () => installDesktopUpdate());
+
+
   // ============================================================
   // APP PATHS
   // ============================================================
@@ -634,7 +656,7 @@ export function registerIpcHandlers() {
     async (input) =>
       core.createSale(
         requireSession(),
-        { ...input, source: "DESKTOP" }
+        input
       )
   );
 

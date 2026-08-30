@@ -50,8 +50,7 @@ export interface CreateSaleInput {
     | "CREDIT";
   paidAmount?: number;
   onlineOrderNumber?: string;
-  /** Where this sale was created. Used only for collision-safe numbering. */
-  source?: "ONLINE" | "DESKTOP";
+  
 }
 
 export function normalizePhone(
@@ -205,17 +204,10 @@ export async function createSale(
       const saleId =
         generateUuid();
 
-      const salePrefix =
-        input.source === "ONLINE"
-          ? INVOICE_PREFIXES.SALE_ONLINE
-          : input.source === "DESKTOP"
-            ? INVOICE_PREFIXES.SALE_DESKTOP
-            : INVOICE_PREFIXES.SALE;
-
       const saleNumber =
         await nextInvoiceNumber(
           tx as unknown as typeof prisma,
-          salePrefix
+          INVOICE_PREFIXES.SALE
         );
 
       let subtotal =
@@ -264,8 +256,6 @@ export async function createSale(
               "SALE",
             referenceId:
               saleId,
-            enqueueBatchSync:
-              input.source !== "ONLINE",
           });
 
         const cogsTotal =
@@ -496,10 +486,6 @@ export async function createSale(
       );
 
       return sale;
-    },
-    {
-      maxWait: 10000,
-      timeout: 30000,
     }
   );
 }

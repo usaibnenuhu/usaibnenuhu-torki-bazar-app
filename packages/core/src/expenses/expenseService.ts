@@ -6,6 +6,7 @@ import { recordAuditLog } from "../audit/auditService";
 import { nextInvoiceNumber } from "../invoicing/invoiceNumberService";
 import { recordExpenseCashOutflow } from "../cash/cashService";
 import { recordBkashExpenseOutflow } from "../bKash/bkashService";
+import { enqueueSync } from "../sync/syncService";
 
 export async function listExpenseCategories(includeArchived = false) {
   return prisma.expenseCategory.findMany({ where: includeArchived ? {} : { isArchived: false }, orderBy: { name: "asc" } });
@@ -68,6 +69,14 @@ export async function createExpense(session: AuthSession, input: CreateExpenseIn
         input.expenseDate ?? new Date()
       );
     }
+
+    await enqueueSync(
+      "EXPENSE",
+      expense.id,
+      "CREATE",
+      { id: expense.id },
+      tx
+    );
 
     await recordAuditLog(session, { action: "CREATE", module: "EXPENSE", recordId: expense.id, newValue: expense }, tx);
     return expense;

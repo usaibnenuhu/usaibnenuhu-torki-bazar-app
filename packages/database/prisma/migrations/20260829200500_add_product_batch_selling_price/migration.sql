@@ -1,0 +1,2 @@
+ALTER TABLE "ProductBatch"
+ADD COLUMN "sellingPrice" DECIMAL NOT NULL DEFAULT 0;

@@ -1,11 +1,7 @@
 // Invoice/reference numbering prefixes. New prefixes can be added without
 // any schema change — the InvoiceSequence table stores counters dynamically.
 export const INVOICE_PREFIXES = {
-  // Legacy sale prefix kept for existing historical records.
   SALE: "TB-SALE",
-  // Source-specific sale prefixes prevent Electron/Online collisions.
-  SALE_ONLINE: "TB-ONL",
-  SALE_DESKTOP: "TB-DES",
   PURCHASE: "TB-PUR",
   RETURN: "TB-RET",
   EXPENSE: "TB-EXP",

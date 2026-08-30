@@ -73,13 +73,17 @@ export async function enqueueSync(
 
 
 async function syncCustomer(customerId: string) {
-  const customer = await prisma.customer.findUnique({ where: { id: customerId } });
-  if (!customer) throw new Error(`Customer ${customerId} not found locally.`);
+  const customer = await prisma.customer.findUnique({
+    where: { id: customerId },
+  });
 
-  let existing = await neonPrisma.customer.findUnique({ where: { id: customer.id } });
-  if (!existing && customer.phone) {
-    existing = await neonPrisma.customer.findFirst({ where: { phone: customer.phone } });
+  if (!customer) {
+    throw new Error(`Customer ${customerId} not found locally.`);
   }
+
+  const existing = await neonPrisma.customer.findUnique({
+    where: { id: customer.id },
+  });
 
   if (existing) {
     await neonPrisma.customer.update({
@@ -92,10 +96,10 @@ async function syncCustomer(customerId: string) {
         updatedAt: customer.updatedAt,
       },
     });
-    return existing.id;
+    return;
   }
 
-  const created = await neonPrisma.customer.create({
+  await neonPrisma.customer.create({
     data: {
       id: customer.id,
       name: customer.name,
@@ -106,8 +110,6 @@ async function syncCustomer(customerId: string) {
       updatedAt: customer.updatedAt,
     },
   });
-
-  return created.id;
 }
 
 
@@ -759,6 +761,60 @@ async function ensureNeonPurchase(
   return created.id;
 }
 
+
+async function syncExpense(expenseId: string) {
+  const expense = await prisma.expense.findUnique({
+    where: { id: expenseId },
+  });
+
+  if (!expense) {
+    throw new Error(`Expense ${expenseId} not found locally.`);
+  }
+
+  const neonCreatedById = await ensureNeonUser(expense.createdById);
+
+  const neonCategory = await neonPrisma.expenseCategory.findUnique({
+    where: { id: expense.categoryId },
+  });
+
+  if (!neonCategory) {
+    throw new Error(
+      `Expense category ${expense.categoryId} does not exist in Neon.`
+    );
+  }
+
+  await neonPrisma.expense.upsert({
+    where: { id: expense.id },
+    create: {
+      id: expense.id,
+      expenseNumber: expense.expenseNumber,
+      categoryId: neonCategory.id,
+      description: expense.description,
+      amount: expense.amount,
+      expenseDate: expense.expenseDate,
+      paymentMethod: expense.paymentMethod,
+      reference: expense.reference,
+      notes: expense.notes,
+      status: expense.status,
+      createdById: neonCreatedById,
+      createdAt: expense.createdAt,
+    },
+    update: {
+      expenseNumber: expense.expenseNumber,
+      categoryId: neonCategory.id,
+      description: expense.description,
+      amount: expense.amount,
+      expenseDate: expense.expenseDate,
+      paymentMethod: expense.paymentMethod,
+      reference: expense.reference,
+      notes: expense.notes,
+      status: expense.status,
+      createdById: neonCreatedById,
+      createdAt: expense.createdAt,
+    },
+  });
+}
+
 async function syncPurchase(purchaseId: string) {
   await ensureNeonPurchase(purchaseId);
   await syncPurchaseItems(purchaseId);
@@ -873,279 +929,6 @@ async function syncSupplierPayment(paymentId: string) {
       createdAt: payment.createdAt,
     },
   });
-}
-
-/**
- * Push one local customer Return from Electron -> Neon.
- *
- * Customer returns were already being created locally and queued as
- * RETURN records, but the queue dispatcher had no RETURN handler.
- *
- * This function is idempotent and also repairs the older returns that
- * were created before RETURN synchronization was wired correctly.
- */
-async function syncReturn(returnId: string) {
-  const returnRecord = await prisma.return.findUnique({
-    where: { id: returnId },
-    include: {
-      items: true,
-    },
-  });
-
-  if (!returnRecord) {
-    throw new Error(`Return ${returnId} not found locally.`);
-  }
-
-  /*
-   * The return references a sale and its SaleItems.
-   * Make absolutely sure the corresponding sale exists in Neon first.
-   *
-   * syncSale() is idempotent and preserves the local SaleItem IDs,
-   * which means ReturnItem.saleItemId can safely reference them.
-   */
-  await syncSale(returnRecord.saleId);
-
-  const neonSale = await neonPrisma.sale.findFirst({
-    where: {
-      OR: [
-        { id: returnRecord.saleId },
-        {
-          saleNumber: (
-            await prisma.sale.findUnique({
-              where: { id: returnRecord.saleId },
-              select: { saleNumber: true },
-            })
-          )?.saleNumber ?? "",
-        },
-      ],
-    },
-    select: {
-      id: true,
-    },
-  });
-
-  if (!neonSale) {
-    throw new Error(
-      `Sale for return ${returnRecord.returnNumber} could not be mapped to Neon.`
-    );
-  }
-
-  /*
-   * Customer ID may differ between Electron and Neon.
-   */
-  let neonCustomerId: string | null = null;
-
-  if (returnRecord.customerId) {
-    neonCustomerId = await syncCustomer(returnRecord.customerId);
-  }
-
-  /*
-   * The creator/user ID may also differ between Electron and Neon.
-   */
-  const neonCreatedById = await ensureNeonUser(
-    returnRecord.createdById
-  );
-
-  /*
-   * Upsert the Return header.
-   */
-  await neonPrisma.return.upsert({
-    where: {
-      id: returnRecord.id,
-    },
-
-    create: {
-      id: returnRecord.id,
-      returnNumber: returnRecord.returnNumber,
-      saleId: neonSale.id,
-      customerId: neonCustomerId,
-      returnDate: returnRecord.returnDate,
-      totalRefund: returnRecord.totalRefund,
-      reason: returnRecord.reason,
-      createdById: neonCreatedById,
-      createdAt: returnRecord.createdAt,
-    },
-
-    update: {
-      returnNumber: returnRecord.returnNumber,
-      saleId: neonSale.id,
-      customerId: neonCustomerId,
-      returnDate: returnRecord.returnDate,
-      totalRefund: returnRecord.totalRefund,
-      reason: returnRecord.reason,
-      createdById: neonCreatedById,
-    },
-  });
-
-  /*
-   * ReturnItems use the same IDs as the local records.
-   *
-   * Product IDs can differ, so resolve the actual Neon product ID.
-   */
-  for (const item of returnRecord.items) {
-    await syncProduct(item.productId);
-
-    const localProduct = await prisma.product.findUnique({
-      where: { id: item.productId },
-    });
-
-    if (!localProduct) {
-      throw new Error(
-        `Product ${item.productId} for return ${returnRecord.returnNumber} not found locally.`
-      );
-    }
-
-    let neonProduct = await neonPrisma.product.findUnique({
-      where: { id: localProduct.id },
-    });
-
-    if (!neonProduct && localProduct.sku) {
-      neonProduct = await neonPrisma.product.findUnique({
-        where: { sku: localProduct.sku },
-      });
-    }
-
-    if (!neonProduct && localProduct.barcode) {
-      neonProduct = await neonPrisma.product.findUnique({
-        where: { barcode: localProduct.barcode },
-      });
-    }
-
-    if (!neonProduct) {
-      throw new Error(
-        `Product ${localProduct.name} for return ${returnRecord.returnNumber} could not be mapped to Neon.`
-      );
-    }
-
-    /*
-     * ReturnItem.saleItemId is preserved by syncSale().
-     * Verify the SaleItem exists in Neon before inserting the ReturnItem.
-     */
-    const neonSaleItem = await neonPrisma.saleItem.findUnique({
-      where: {
-        id: item.saleItemId,
-      },
-      select: {
-        id: true,
-      },
-    });
-
-    if (!neonSaleItem) {
-      throw new Error(
-        `SaleItem ${item.saleItemId} for return ${returnRecord.returnNumber} is missing in Neon.`
-      );
-    }
-
-    /*
-     * targetBatchId is optional.
-     * Only use it if that batch exists in Neon.
-     */
-    let neonTargetBatchId: string | null = null;
-
-    if (item.targetBatchId) {
-      const neonBatch = await neonPrisma.productBatch.findUnique({
-        where: {
-          id: item.targetBatchId,
-        },
-        select: {
-          id: true,
-        },
-      });
-
-      if (neonBatch) {
-        neonTargetBatchId = neonBatch.id;
-      }
-    }
-
-    await neonPrisma.returnItem.upsert({
-      where: {
-        id: item.id,
-      },
-
-      create: {
-        id: item.id,
-        returnId: returnRecord.id,
-        saleItemId: neonSaleItem.id,
-        productId: neonProduct.id,
-        quantity: item.quantity,
-        condition: item.condition,
-        refundAmount: item.refundAmount,
-        targetBatchId: neonTargetBatchId,
-      },
-
-      update: {
-        returnId: returnRecord.id,
-        saleItemId: neonSaleItem.id,
-        productId: neonProduct.id,
-        quantity: item.quantity,
-        condition: item.condition,
-        refundAmount: item.refundAmount,
-        targetBatchId: neonTargetBatchId,
-      },
-    });
-  }
-
-  console.log(
-    `[sync] RETURN ${returnRecord.returnNumber} -> Neon OK`
-  );
-}
-
-
-/**
- * Reconcile every local customer Return with the sync queue.
- *
- * This repairs old returns that were created before RETURN synchronization
- * was correctly wired.
- */
-async function enqueueMissingReturns() {
-  const [returns, queuedReturns] = await Promise.all([
-    prisma.return.findMany({
-      select: {
-        id: true,
-      },
-    }),
-
-    prisma.syncQueue.findMany({
-      where: {
-        entityType: "RETURN",
-        syncStatus: {
-          in: ["PENDING", "FAILED", "SYNCED"],
-        },
-      },
-      select: {
-        entityId: true,
-      },
-    }),
-  ]);
-
-  const queuedIds = new Set(
-    queuedReturns.map((item) => item.entityId)
-  );
-
-  let created = 0;
-
-  for (const returnRecord of returns) {
-    if (queuedIds.has(returnRecord.id)) {
-      continue;
-    }
-
-    await enqueueSync(
-      "RETURN",
-      returnRecord.id,
-      "CREATE",
-      { id: returnRecord.id }
-    );
-
-    created++;
-  }
-
-  if (created > 0) {
-    console.log(
-      `[sync] Reconciled ${created} customer return(s) for Neon synchronization.`
-    );
-  }
-
-  return created;
 }
 
 async function syncSupplierReturn(returnId: string) {
@@ -1442,42 +1225,49 @@ async function syncSale(saleId: string) {
   const sale = await prisma.sale.findUnique({
     where: { id: saleId },
     include: {
-      items: { include: { batchConsumptions: true } },
+      items: true,
       customerPayments: true,
     },
   });
 
-  if (!sale) throw new Error(`Sale ${saleId} not found locally.`);
-
-  const neonCreatedById = await ensureNeonUser(sale.createdById);
-
-  let neonCustomerId: string | null = null;
-  if (sale.customerId) {
-    neonCustomerId = await syncCustomer(sale.customerId);
+  if (!sale) {
+    throw new Error(`Sale ${saleId} not found locally.`);
   }
 
-  const neonProductIds = new Map<string, string>();
+  // Make sure the cashier/user exists in Neon.
+  const neonCreatedById = await ensureNeonUser(
+    sale.createdById
+  );
+
+  // Make sure the customer exists in Neon.
+  if (sale.customerId) {
+    await syncCustomer(sale.customerId);
+  }
+
+  // Make sure every product referenced by the sale exists in Neon.
   for (const item of sale.items) {
     await syncProduct(item.productId);
-    const localProduct = await prisma.product.findUnique({ where: { id: item.productId } });
-    if (!localProduct) throw new Error(`Product ${item.productId} not found locally.`);
-    let neonProduct = await neonPrisma.product.findUnique({ where: { id: localProduct.id } });
-    if (!neonProduct && localProduct.sku) {
-      neonProduct = await neonPrisma.product.findUnique({ where: { sku: localProduct.sku } });
-    }
-    if (!neonProduct && localProduct.barcode) {
-      neonProduct = await neonPrisma.product.findUnique({ where: { barcode: localProduct.barcode } });
-    }
-    if (!neonProduct) throw new Error(`Product ${localProduct.name} could not be mapped to Neon.`);
-    neonProductIds.set(localProduct.id, neonProduct.id);
   }
 
-  let existing = await neonPrisma.sale.findUnique({ where: { id: sale.id } });
-  if (!existing) existing = await neonPrisma.sale.findUnique({ where: { saleNumber: sale.saleNumber } });
+  /*
+   * Do not blindly upsert by ID.
+   *
+   * A sale may already exist in Neon under the same saleNumber
+   * but with a different database ID.
+   */
+  let existing = await neonPrisma.sale.findUnique({
+    where: { id: sale.id },
+  });
+
+  if (!existing) {
+    existing = await neonPrisma.sale.findUnique({
+      where: { saleNumber: sale.saleNumber },
+    });
+  }
 
   const saleData = {
     saleNumber: sale.saleNumber,
-    customerId: neonCustomerId,
+    customerId: sale.customerId,
     saleDate: sale.saleDate,
     subtotal: sale.subtotal,
     discount: sale.discount,
@@ -1488,24 +1278,63 @@ async function syncSale(saleId: string) {
     status: sale.status,
     voidReason: sale.voidReason,
     codCollectedAt: sale.codCollectedAt,
-    codCollectedById: sale.codCollectedById ? await ensureNeonUser(sale.codCollectedById) : null,
+    codCollectedById: sale.codCollectedById
+      ? await ensureNeonUser(sale.codCollectedById)
+      : null,
     onlineOrderNumber: sale.onlineOrderNumber,
     createdById: neonCreatedById,
     createdAt: sale.createdAt,
   };
 
-  const neonSale = existing
-    ? await neonPrisma.sale.update({ where: { id: existing.id }, data: saleData })
-    : await neonPrisma.sale.create({ data: { id: sale.id, ...saleData } });
+  if (existing) {
+    await neonPrisma.sale.update({
+      where: { id: existing.id },
+      data: saleData,
+    });
 
+    console.log(
+      `[sync] Sale reconciled: Electron ${sale.id} -> Neon ${existing.id} (${sale.saleNumber})`
+    );
+  } else {
+    await neonPrisma.sale.create({
+      data: {
+        id: sale.id,
+        ...saleData,
+      },
+    });
+
+    console.log(
+      `[sync] Sale created in Neon: ${sale.saleNumber}`
+    );
+  }
+
+  const neonSale = await neonPrisma.sale.findFirst({
+    where: {
+      saleNumber: sale.saleNumber,
+    },
+  });
+
+  if (!neonSale) {
+    throw new Error(
+      `Sale ${sale.saleNumber} was not found in Neon after synchronization.`
+    );
+  }
+
+  /*
+   * Synchronize sale items.
+   *
+   * Delete/recreate is intentionally avoided because item IDs are
+   * stable and upsert makes repeated synchronization safe.
+   */
   for (const item of sale.items) {
-    const neonProductId = neonProductIds.get(item.productId)!;
-    const neonItem = await neonPrisma.saleItem.upsert({
-      where: { id: item.id },
+    await neonPrisma.saleItem.upsert({
+      where: {
+        id: item.id,
+      },
       create: {
         id: item.id,
         saleId: neonSale.id,
-        productId: neonProductId,
+        productId: item.productId,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
         discount: item.discount,
@@ -1514,7 +1343,7 @@ async function syncSale(saleId: string) {
       },
       update: {
         saleId: neonSale.id,
-        productId: neonProductId,
+        productId: item.productId,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
         discount: item.discount,
@@ -1522,222 +1351,47 @@ async function syncSale(saleId: string) {
         cogsTotal: item.cogsTotal,
       },
     });
-
-    for (const consumption of item.batchConsumptions) {
-      const neonBatch = await neonPrisma.productBatch.findUnique({ where: { id: consumption.batchId } });
-      if (!neonBatch) {
-        console.warn(`[sync] Skipping missing Neon batch ${consumption.batchId} for sale ${sale.saleNumber}`);
-        continue;
-      }
-      await neonPrisma.saleItemBatchConsumption.upsert({
-        where: { id: consumption.id },
-        create: {
-          id: consumption.id,
-          saleItemId: neonItem.id,
-          batchId: neonBatch.id,
-          quantityConsumed: consumption.quantityConsumed,
-          unitCost: consumption.unitCost,
-        },
-        update: {
-          saleItemId: neonItem.id,
-          batchId: neonBatch.id,
-          quantityConsumed: consumption.quantityConsumed,
-          unitCost: consumption.unitCost,
-        },
-      });
-    }
   }
 
+  /*
+   * Customer payments belong to the sale.
+   * Sync them as well so credit/payment history is preserved.
+   */
   for (const payment of sale.customerPayments) {
-    const paymentCustomer = payment.customerId ? await prisma.customer.findUnique({ where: { id: payment.customerId } }) : null;
-    let paymentNeonCustomerId = neonCustomerId;
-    if (paymentCustomer) {
-      await syncCustomer(paymentCustomer.id);
-      let c = await neonPrisma.customer.findUnique({ where: { id: paymentCustomer.id } });
-      if (!c && paymentCustomer.phone) c = await neonPrisma.customer.findFirst({ where: { phone: paymentCustomer.phone } });
-      paymentNeonCustomerId = c?.id ?? paymentNeonCustomerId;
+    const neonPaymentCreatedById = await ensureNeonUser(
+      payment.createdById
+    );
+
+    if (payment.customerId) {
+      await syncCustomer(payment.customerId);
     }
+
     await neonPrisma.customerPayment.upsert({
-      where: { id: payment.id },
+      where: {
+        id: payment.id,
+      },
       create: {
         id: payment.id,
-        customerId: paymentNeonCustomerId,
+        customerId: payment.customerId,
         saleId: neonSale.id,
         amount: payment.amount,
         paymentDate: payment.paymentDate,
         method: payment.method,
         reference: payment.reference,
-        createdById: await ensureNeonUser(payment.createdById),
+        createdById: neonPaymentCreatedById,
         createdAt: payment.createdAt,
       },
       update: {
-        customerId: paymentNeonCustomerId,
+        customerId: payment.customerId,
         saleId: neonSale.id,
         amount: payment.amount,
         paymentDate: payment.paymentDate,
         method: payment.method,
         reference: payment.reference,
-        createdById: await ensureNeonUser(payment.createdById),
+        createdById: neonPaymentCreatedById,
       },
     });
   }
-}
-
-
-async function syncExpense(expenseId: string) {
-  const expense = await prisma.expense.findUnique({
-    where: { id: expenseId },
-  });
-
-  if (!expense) {
-    throw new Error(`Expense ${expenseId} not found locally.`);
-  }
-
-  // Ensure the user who created the expense exists in Neon.
-  // Expense.createdById has a foreign-key constraint to User.id.
-  const createdBy = await prisma.user.findUnique({
-    where: { id: expense.createdById },
-  });
-
-  if (!createdBy) {
-    throw new Error(
-      `Expense creator ${expense.createdById} not found locally.`
-    );
-  }
-
-  let existingNeonUser = await neonPrisma.user.findUnique({
-    where: { id: createdBy.id },
-  });
-
-  if (!existingNeonUser) {
-    // User.roleId also references Role, so ensure the role exists first.
-    const localRole = await prisma.role.findUnique({
-      where: { id: createdBy.roleId },
-    });
-
-    if (!localRole) {
-      throw new Error(
-        `Expense creator role ${createdBy.roleId} not found locally.`
-      );
-    }
-
-    let existingNeonRole = await neonPrisma.role.findUnique({
-      where: { id: localRole.id },
-    });
-
-    if (!existingNeonRole) {
-      existingNeonRole = await neonPrisma.role.findUnique({
-        where: { name: localRole.name },
-      });
-    }
-
-    if (!existingNeonRole) {
-      existingNeonRole = await neonPrisma.role.create({
-        data: {
-          id: localRole.id,
-          name: localRole.name,
-          description: localRole.description,
-        },
-      });
-    }
-
-    existingNeonUser = await neonPrisma.user.findUnique({
-      where: { username: createdBy.username },
-    });
-
-    if (!existingNeonUser) {
-      existingNeonUser = await neonPrisma.user.create({
-        data: {
-          id: createdBy.id,
-          username: createdBy.username,
-          passwordHash: createdBy.passwordHash,
-          fullName: createdBy.fullName,
-          phone: createdBy.phone,
-          roleId: existingNeonRole.id,
-          isActive: createdBy.isActive,
-          lastLoginAt: createdBy.lastLoginAt,
-          createdAt: createdBy.createdAt,
-          updatedAt: createdBy.updatedAt,
-        },
-      });
-    }
-  }
-
-  // Ensure the referenced category exists in Neon.
-  const category = await prisma.expenseCategory.findUnique({
-    where: { id: expense.categoryId },
-  });
-
-  if (!category) {
-    throw new Error(
-      `Expense category ${expense.categoryId} not found locally.`
-    );
-  }
-
-  let existingCategory = await neonPrisma.expenseCategory.findUnique({
-    where: { id: category.id },
-  });
-
-  /*
-   * The category may already exist in Neon with the same name
-   * but a different ID. Reuse that Neon category instead of
-   * attempting another INSERT and hitting the unique name constraint.
-   */
-  if (!existingCategory) {
-    existingCategory = await neonPrisma.expenseCategory.findUnique({
-      where: { name: category.name },
-    });
-  }
-
-  if (!existingCategory) {
-    existingCategory = await neonPrisma.expenseCategory.create({
-      data: {
-        id: category.id,
-        name: category.name,
-        isArchived: category.isArchived,
-      },
-    });
-  }
-
-  const existing = await neonPrisma.expense.findUnique({
-    where: { id: expense.id },
-  });
-
-  /*
-   * IMPORTANT:
-   * The local Electron user ID may differ from the Neon user ID.
-   * Always use the actual Neon user's ID for the foreign key.
-   */
-  const neonCreatedById = existingNeonUser?.id ?? createdBy.id;
-
-  const data = {
-    expenseNumber: expense.expenseNumber,
-    categoryId: existingCategory.id,
-    description: expense.description,
-    amount: expense.amount,
-    expenseDate: expense.expenseDate,
-    paymentMethod: expense.paymentMethod,
-    reference: expense.reference,
-    notes: expense.notes,
-    status: expense.status,
-    createdById: neonCreatedById,
-    createdAt: expense.createdAt,
-  };
-
-  if (existing) {
-    await neonPrisma.expense.update({
-      where: { id: expense.id },
-      data,
-    });
-    return;
-  }
-
-  await neonPrisma.expense.create({
-    data: {
-      id: expense.id,
-      ...data,
-    },
-  });
 }
 
 async function syncQueueItem(item: {
@@ -1766,20 +1420,16 @@ async function syncQueueItem(item: {
       await syncCashTransaction(item.entityId);
       return;
 
-    case "EXPENSE":
-      await syncExpense(item.entityId);
-      return;
-
-    case "RETURN":
-      await syncReturn(item.entityId);
-      break;
-
     case "SUPPLIER_RETURN":
       await syncSupplierReturn(item.entityId);
       return;
 
     case "PURCHASE":
       await syncPurchase(item.entityId);
+      return;
+
+    case "EXPENSE":
+      await syncExpense(item.entityId);
       return;
 
     case "PRODUCT":
@@ -1823,58 +1473,33 @@ async function syncQueueItem(item: {
  * permanent SALE synchronization existed.
  */
 async function enqueueMissingSales() {
-  /*
-   * Reconcile every local Electron/POS sale with Neon.
-   *
-   * A sale is considered synchronized only when the corresponding
-   * Neon sale exists. Existing queue records are not trusted because
-   * older records may have failed or become stale.
-   */
-  const sales = await prisma.sale.findMany({
-    select: {
-      id: true,
-      saleNumber: true,
-    },
-    orderBy: {
-      createdAt: "asc",
-    },
-  });
+  const [sales, queuedSales] = await Promise.all([
+    prisma.sale.findMany({
+      select: {
+        id: true,
+      },
+    }),
+
+    prisma.syncQueue.findMany({
+      where: {
+        entityType: "SALE",
+      },
+      select: {
+        entityId: true,
+      },
+    }),
+  ]);
+
+  const queuedIds = new Set(
+    queuedSales.map((item) => item.entityId)
+  );
 
   let created = 0;
 
   for (const sale of sales) {
-    const existingNeonSale = await neonPrisma.sale.findFirst({
-      where: {
-        OR: [
-          { id: sale.id },
-          { saleNumber: sale.saleNumber },
-        ],
-      },
-      select: {
-        id: true,
-      },
-    });
-
-    /*
-     * The sale already exists in Neon.
-     */
-    if (existingNeonSale) {
+    if (queuedIds.has(sale.id)) {
       continue;
     }
-
-    /*
-     * Remove stale pending/failed queue records so this sale gets
-     * a clean synchronization attempt.
-     */
-    await prisma.syncQueue.deleteMany({
-      where: {
-        entityType: "SALE",
-        entityId: sale.id,
-        syncStatus: {
-          in: ["PENDING", "FAILED"],
-        },
-      },
-    });
 
     await enqueueSync(
       "SALE",
@@ -1890,7 +1515,7 @@ async function enqueueMissingSales() {
 
   if (created > 0) {
     console.log(
-      `[sync] Reconciled ${created} POS sale(s) for Neon synchronization.`
+      `[sync] Queued ${created} missing Electron sale(s) for Neon synchronization.`
     );
   }
 
@@ -2028,70 +1653,6 @@ async function enqueueMissingPurchases() {
  * by syncCashTransaction(), so the queue payload itself is only
  * metadata.
  */
-
-async function enqueueMissingExpenses() {
-  /*
-   * NETWORK-SAFE RECONCILIATION
-   *
-   * This function runs during every sync cycle.
-   * It MUST NOT contact Neon.
-   *
-   * If the internet/Neon is temporarily unavailable, the sync button
-   * must still be able to run and leave the records in the local queue.
-   *
-   * The actual Neon existence check is performed later when the queued
-   * EXPENSE is processed.
-   */
-  const [expenses, queuedExpenses] = await Promise.all([
-    prisma.expense.findMany({
-      select: {
-        id: true,
-      },
-    }),
-
-    prisma.syncQueue.findMany({
-      where: {
-        entityType: "EXPENSE",
-        syncStatus: {
-          in: ["PENDING", "FAILED", "SYNCED"],
-        },
-      },
-      select: {
-        entityId: true,
-      },
-    }),
-  ]);
-
-  const queuedIds = new Set(
-    queuedExpenses.map((item) => item.entityId)
-  );
-
-  let created = 0;
-
-  for (const expense of expenses) {
-    if (queuedIds.has(expense.id)) {
-      continue;
-    }
-
-    await enqueueSync(
-      "EXPENSE",
-      expense.id,
-      "CREATE",
-      { id: expense.id }
-    );
-
-    created++;
-  }
-
-  if (created > 0) {
-    console.log(
-      `[sync] Reconciled ${created} expense(s) locally for Neon synchronization.`
-    );
-  }
-
-  return created;
-}
-
 async function enqueueMissingCashTransactions() {
   const [cashTransactions, queuedCashTransactions] =
     await Promise.all([
@@ -2254,47 +1815,6 @@ export async function pullRemoteChanges() {
           updatedAt: remote.updatedAt,
         },
       });
-    }
-  }
-
-  // ============================================================
-  // CUSTOMERS
-  // ============================================================
-
-  const customerMap = new Map<string, string>();
-  const remoteCustomers = await neonPrisma.customer.findMany({ orderBy: { createdAt: "asc" } });
-
-  for (const remote of remoteCustomers) {
-    let existing = await prisma.customer.findUnique({ where: { id: remote.id } });
-    if (!existing && remote.phone) {
-      existing = await prisma.customer.findFirst({ where: { phone: remote.phone } });
-    }
-
-    if (existing) {
-      await prisma.customer.update({
-        where: { id: existing.id },
-        data: {
-          name: remote.name,
-          phone: remote.phone,
-          address: remote.address,
-          status: remote.status,
-          updatedAt: remote.updatedAt,
-        },
-      });
-      customerMap.set(remote.id, existing.id);
-    } else {
-      const created = await prisma.customer.create({
-        data: {
-          id: remote.id,
-          name: remote.name,
-          phone: remote.phone,
-          address: remote.address,
-          status: remote.status,
-          createdAt: remote.createdAt,
-          updatedAt: remote.updatedAt,
-        },
-      });
-      customerMap.set(remote.id, created.id);
     }
   }
 
@@ -2658,222 +2178,6 @@ export async function pullRemoteChanges() {
   }
 
   // ============================================================
-  // CASH TRANSACTIONS
-  // IMPORTANT: Neon can contain cash entries created by the online POS.
-  // Electron previously only PUSHED cash transactions to Neon, but did
-  // not PULL remote cash transactions back into SQLite. That made the
-  // Electron cash balance smaller than the online balance.
-  //
-  // Pulled rows are written directly and marked as PULL/SYNCED so the
-  // local reconciliation does not enqueue them again.
-  // ============================================================
-
-  const remoteCashTransactions = await neonPrisma.cashTransaction.findMany({
-    orderBy: { createdAt: "asc" },
-  });
-
-  for (const remote of remoteCashTransactions) {
-    let localCreatedById: string | null = null;
-
-    const localUserById = await prisma.user.findUnique({
-      where: { id: remote.createdById },
-      select: { id: true },
-    });
-
-    if (localUserById) {
-      localCreatedById = localUserById.id;
-    } else {
-      const remoteUser = await neonPrisma.user.findUnique({
-        where: { id: remote.createdById },
-        select: { username: true },
-      });
-
-      if (remoteUser) {
-        const localUserByUsername = await prisma.user.findUnique({
-          where: { username: remoteUser.username },
-          select: { id: true },
-        });
-
-        if (localUserByUsername) {
-          localCreatedById = localUserByUsername.id;
-        }
-      }
-    }
-
-    if (!localCreatedById) {
-      console.warn(
-        `[pull] Skipping cash transaction ${remote.id}: creator mapping missing`
-      );
-      continue;
-    }
-
-    await prisma.cashTransaction.upsert({
-      where: { id: remote.id },
-      create: {
-        id: remote.id,
-        type: remote.type,
-        amount: remote.amount,
-        transactionDate: remote.transactionDate,
-        note: remote.note,
-        createdById: localCreatedById,
-        createdAt: remote.createdAt,
-      },
-      update: {
-        type: remote.type,
-        amount: remote.amount,
-        transactionDate: remote.transactionDate,
-        note: remote.note,
-        createdById: localCreatedById,
-        createdAt: remote.createdAt,
-      },
-    });
-
-    const existingPullMarker = await prisma.syncQueue.findFirst({
-      where: {
-        entityType: "CASH_TRANSACTION",
-        entityId: remote.id,
-      },
-      select: { id: true },
-    });
-
-    if (!existingPullMarker) {
-      await prisma.syncQueue.create({
-        data: {
-          entityType: "CASH_TRANSACTION",
-          entityId: remote.id,
-          operationType: "PULL",
-          payload: JSON.stringify({ source: "NEON", remoteId: remote.id }),
-          syncStatus: "SYNCED",
-          syncedAt: new Date(),
-        },
-      });
-    }
-
-    pulled++;
-  }
-
-  // ============================================================
-  // SALES
-  // IMPORTANT: pull sales before purchases only for the sale records;
-  // sale items/batch consumptions are completed after batches exist.
-  // ============================================================
-
-  const remoteSales = await neonPrisma.sale.findMany({
-    include: {
-      items: { include: { batchConsumptions: true } },
-      customerPayments: true,
-    },
-    orderBy: { createdAt: "asc" },
-  });
-
-  const saleMap = new Map<string, string>();
-  const pendingRemoteSaleItems = remoteSales;
-
-  for (const remote of remoteSales) {
-    let user = await prisma.user.findUnique({ where: { id: remote.createdById } });
-    if (!user) {
-      const remoteUser = await neonPrisma.user.findUnique({ where: { id: remote.createdById } });
-      if (remoteUser) user = await prisma.user.findUnique({ where: { username: remoteUser.username } });
-    }
-    if (!user) {
-      console.warn(`[pull] Skipping sale ${remote.saleNumber}: creator mapping missing`);
-      continue;
-    }
-
-    const localCustomerId = remote.customerId
-      ? customerMap.get(remote.customerId) ?? remote.customerId
-      : null;
-
-    if (localCustomerId) {
-      const customer = await prisma.customer.findUnique({ where: { id: localCustomerId } });
-      if (!customer) {
-        console.warn(`[pull] Skipping sale ${remote.saleNumber}: customer mapping missing`);
-        continue;
-      }
-    }
-
-    let existing = await prisma.sale.findUnique({ where: { id: remote.id } });
-    if (!existing) existing = await prisma.sale.findUnique({ where: { saleNumber: remote.saleNumber } });
-
-    // Resolve the COD collector from Neon to the LOCAL Electron user.
-    // Never copy a Neon user ID directly into the local database.
-    let localCodCollectedById: string | null = null;
-
-    if (remote.codCollectedById) {
-      let codUser = await prisma.user.findUnique({
-        where: { id: remote.codCollectedById },
-      });
-
-      if (!codUser) {
-        const remoteCodUser = await neonPrisma.user.findUnique({
-          where: { id: remote.codCollectedById },
-        });
-
-        if (remoteCodUser) {
-          codUser = await prisma.user.findUnique({
-            where: { username: remoteCodUser.username },
-          });
-        }
-      }
-
-      if (codUser) {
-        localCodCollectedById = codUser.id;
-      } else {
-        console.warn(
-          `[pull] COD collector ${remote.codCollectedById} could not be mapped locally for sale ${remote.saleNumber}; saving null.`
-        );
-      }
-    }
-
-    const saleData = {
-      saleNumber: remote.saleNumber,
-      customerId: localCustomerId,
-      saleDate: remote.saleDate,
-      subtotal: remote.subtotal,
-      discount: remote.discount,
-      totalAmount: remote.totalAmount,
-      cogsAmount: remote.cogsAmount,
-      paymentMethod: remote.paymentMethod,
-      paymentStatus: remote.paymentStatus,
-      status: remote.status,
-      voidReason: remote.voidReason,
-      codCollectedAt: remote.codCollectedAt,
-      codCollectedById: localCodCollectedById,
-      onlineOrderNumber: remote.onlineOrderNumber,
-      createdById: user.id,
-      createdAt: remote.createdAt,
-    };
-
-    if (existing) {
-      await prisma.sale.update({ where: { id: existing.id }, data: saleData });
-      saleMap.set(remote.id, existing.id);
-    } else {
-      const created = await prisma.sale.create({ data: { id: remote.id, ...saleData } });
-      saleMap.set(remote.id, created.id);
-    }
-
-    // Mark the remote sale as already synchronized locally so the
-    // reconciliation pass never re-queues it for Electron -> Neon.
-    const alreadyMarked = await prisma.syncQueue.findFirst({
-      where: { entityType: "SALE", entityId: saleMap.get(remote.id)!, syncStatus: "SYNCED" },
-    });
-    if (!alreadyMarked) {
-      await prisma.syncQueue.create({
-        data: {
-          entityType: "SALE",
-          entityId: saleMap.get(remote.id)!,
-          operationType: "PULL",
-          payload: JSON.stringify({ source: "NEON", remoteId: remote.id }),
-          syncStatus: "SYNCED",
-          syncedAt: new Date(),
-        },
-      });
-    }
-
-    pulled++;
-  }
-
-  // ============================================================
   // PURCHASES
   // IMPORTANT: PURCHASES BEFORE BATCHES
   // ============================================================
@@ -2966,7 +2270,6 @@ export async function pullRemoteChanges() {
       supplierId: supplier.id,
       invoiceNumber: remote.invoiceNumber,
       purchaseDate: remote.purchaseDate,
-      totalAmount: remote.totalAmount,
       paidAmount: remote.paidAmount,
       dueAmount: remote.dueAmount,
       paymentStatus: remote.paymentStatus,
@@ -2991,11 +2294,11 @@ export async function pullRemoteChanges() {
       );
     } else {
       const createdPurchase = await prisma.purchase.create({
-        data: {
+        data: ({
           id: remote.id,
           ...purchaseData,
           createdAt: remote.createdAt,
-        },
+        } as any),
       });
 
       purchaseMap.set(remote.id, createdPurchase.id);
@@ -3107,111 +2410,6 @@ export async function pullRemoteChanges() {
   }
 
   // ============================================================
-  // SALE ITEMS + BATCH CONSUMPTIONS
-  // ============================================================
-
-  for (const remote of pendingRemoteSaleItems) {
-    const localSaleId = saleMap.get(remote.id);
-    if (!localSaleId) continue;
-
-    for (const item of remote.items) {
-      const localProductId = productMap.get(item.productId) ?? item.productId;
-      const product = await prisma.product.findUnique({ where: { id: localProductId } });
-      if (!product) {
-        console.warn(`[pull] Skipping sale item ${item.id}: product mapping missing`);
-        continue;
-      }
-
-      const localSaleItem = await prisma.saleItem.upsert({
-        where: { id: item.id },
-        create: {
-          id: item.id,
-          saleId: localSaleId,
-          productId: product.id,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
-          discount: item.discount,
-          subtotal: item.subtotal,
-          cogsTotal: item.cogsTotal,
-        },
-        update: {
-          saleId: localSaleId,
-          productId: product.id,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
-          discount: item.discount,
-          subtotal: item.subtotal,
-          cogsTotal: item.cogsTotal,
-        },
-      });
-
-      for (const consumption of item.batchConsumptions) {
-        const batch = await prisma.productBatch.findUnique({ where: { id: consumption.batchId } });
-        if (!batch) {
-          console.warn(`[pull] Skipping sale batch consumption ${consumption.id}: batch missing`);
-          continue;
-        }
-        await prisma.saleItemBatchConsumption.upsert({
-          where: { id: consumption.id },
-          create: {
-            id: consumption.id,
-            saleItemId: localSaleItem.id,
-            batchId: batch.id,
-            quantityConsumed: consumption.quantityConsumed,
-            unitCost: consumption.unitCost,
-          },
-          update: {
-            saleItemId: localSaleItem.id,
-            batchId: batch.id,
-            quantityConsumed: consumption.quantityConsumed,
-            unitCost: consumption.unitCost,
-          },
-        });
-      }
-    }
-
-    for (const payment of remote.customerPayments) {
-      const localCustomerId = payment.customerId
-        ? customerMap.get(payment.customerId) ?? payment.customerId
-        : null;
-      if (localCustomerId) {
-        const customer = await prisma.customer.findUnique({ where: { id: localCustomerId } });
-        if (!customer) continue;
-      }
-      let user = await prisma.user.findUnique({ where: { id: payment.createdById } });
-      if (!user) {
-        const remoteUser = await neonPrisma.user.findUnique({ where: { id: payment.createdById } });
-        if (remoteUser) user = await prisma.user.findUnique({ where: { username: remoteUser.username } });
-      }
-      if (!user) continue;
-
-      await prisma.customerPayment.upsert({
-        where: { id: payment.id },
-        create: {
-          id: payment.id,
-          customerId: localCustomerId,
-          saleId: localSaleId,
-          amount: payment.amount,
-          paymentDate: payment.paymentDate,
-          method: payment.method,
-          reference: payment.reference,
-          createdById: user.id,
-          createdAt: payment.createdAt,
-        },
-        update: {
-          customerId: localCustomerId,
-          saleId: localSaleId,
-          amount: payment.amount,
-          paymentDate: payment.paymentDate,
-          method: payment.method,
-          reference: payment.reference,
-          createdById: user.id,
-        },
-      });
-    }
-  }
-
-  // ============================================================
   // PURCHASE ITEMS
   // ============================================================
 
@@ -3287,583 +2485,849 @@ export async function pullRemoteChanges() {
 
 
   // ============================================================
-  // NEON -> ELECTRON CUSTOMER RETURN PULL
-  //
-  // Customer returns can be created from the online portal.
-  // They must also appear in the Electron SQLite database.
-  //
-  // This is intentionally idempotent:
-  // - existing returns are updated
-  // - missing returns are created
-  // - ReturnItems are upserted
-  // - pulled returns are marked SYNCED so they are NOT pushed
-  // back to Neon again.
+  // CUSTOMERS
   // ============================================================
 
-  const remoteReturns = await neonPrisma.return.findMany({
-    include: {
-      items: true,
-    },
-    orderBy: {
-      createdAt: "asc",
-    },
+  const customerMap = new Map<string, string>();
+
+  const remoteCustomers = await neonPrisma.customer.findMany({
+    orderBy: { createdAt: "asc" },
   });
 
-  for (const remote of remoteReturns) {
-    // ----------------------------------------------------------
-    // Resolve the LOCAL sale.
-    // ----------------------------------------------------------
-    let localSale = await prisma.sale.findUnique({
-      where: { id: remote.saleId },
+  for (const remote of remoteCustomers) {
+    let existing = await prisma.customer.findUnique({
+      where: { id: remote.id },
     });
 
-    if (!localSale) {
-      const remoteSale = await neonPrisma.sale.findUnique({
-        where: { id: remote.saleId },
-        select: { saleNumber: true },
+    if (!existing && remote.phone) {
+      existing = await prisma.customer.findUnique({
+        where: { phone: remote.phone },
       });
-
-      if (remoteSale) {
-        localSale = await prisma.sale.findUnique({
-          where: { saleNumber: remoteSale.saleNumber },
-        });
-      }
     }
 
-    if (!localSale) {
-      console.warn(
-        `[pull] Skipping return ${remote.returnNumber}: sale mapping missing`
-      );
-      continue;
-    }
+    const data = {
+      name: remote.name,
+      phone: remote.phone,
+      address: remote.address,
+      status: remote.status,
+      updatedAt: remote.updatedAt,
+    };
 
-    // ----------------------------------------------------------
-    // Resolve LOCAL customer.
-    // ----------------------------------------------------------
-    let localCustomerId: string | null = null;
-
-    if (remote.customerId) {
-      let localCustomer = await prisma.customer.findUnique({
-        where: { id: remote.customerId },
+    if (existing) {
+      await prisma.customer.update({
+        where: { id: existing.id },
+        data,
       });
-
-      if (!localCustomer) {
-        const remoteCustomer = await neonPrisma.customer.findUnique({
-          where: { id: remote.customerId },
-        });
-
-        if (remoteCustomer?.phone) {
-          localCustomer = await prisma.customer.findFirst({
-            where: { phone: remoteCustomer.phone },
-          });
-        }
-      }
-
-      if (localCustomer) {
-        localCustomerId = localCustomer.id;
-      }
+      customerMap.set(remote.id, existing.id);
+    } else {
+      const created = await prisma.customer.create({
+        data: {
+          id: remote.id,
+          ...data,
+          createdAt: remote.createdAt,
+        },
+      });
+      customerMap.set(remote.id, created.id);
     }
+  }
 
-    // ----------------------------------------------------------
-    // Resolve LOCAL creator/user.
-    // ----------------------------------------------------------
-    let localCreatedBy = await prisma.user.findUnique({
+  // ============================================================
+  // SALES + SALE ITEMS + BATCH CONSUMPTIONS
+  // ============================================================
+
+  const remoteSales = await neonPrisma.sale.findMany({
+    include: {
+      items: {
+        include: {
+          batchConsumptions: true,
+        },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  const saleMap = new Map<string, string>();
+
+  for (const remote of remoteSales) {
+    const customerId = remote.customerId
+      ? customerMap.get(remote.customerId) ?? remote.customerId
+      : null;
+
+    let createdById = remote.createdById;
+
+    const localUser = await prisma.user.findUnique({
       where: { id: remote.createdById },
     });
 
-    if (!localCreatedBy) {
+    if (!localUser) {
       const remoteUser = await neonPrisma.user.findUnique({
         where: { id: remote.createdById },
       });
 
       if (remoteUser) {
-        localCreatedBy = await prisma.user.findUnique({
+        const matchedUser = await prisma.user.findUnique({
           where: { username: remoteUser.username },
+        });
+
+        if (matchedUser) {
+          createdById = matchedUser.id;
+        }
+      }
+    }
+
+    // Resolve optional COD collector from Neon user ID to local Electron user ID.
+    let codCollectedById: string | null = null;
+
+    if (remote.codCollectedById) {
+      const localCodUser = await prisma.user.findUnique({
+        where: { id: remote.codCollectedById },
+      });
+
+      if (localCodUser) {
+        codCollectedById = localCodUser.id;
+      } else {
+        const remoteCodUser = await neonPrisma.user.findUnique({
+          where: { id: remote.codCollectedById },
+        });
+
+        if (remoteCodUser) {
+          const matchedCodUser = await prisma.user.findUnique({
+            where: { username: remoteCodUser.username },
+          });
+
+          if (matchedCodUser) {
+            codCollectedById = matchedCodUser.id;
+          }
+        }
+      }
+
+      if (!codCollectedById) {
+        throw new Error(
+          `[pull] Cannot resolve Sale.codCollectedById locally: ` +
+          `Neon user ${remote.codCollectedById}, sale ${remote.id}`
+        );
+      }
+    }
+
+    const saleData = {
+      saleNumber: remote.saleNumber,
+      customerId,
+      saleDate: remote.saleDate,
+      subtotal: remote.subtotal,
+      discount: remote.discount,
+      cogsAmount: remote.cogsAmount,
+      totalAmount: remote.totalAmount,
+      paymentMethod: remote.paymentMethod,
+      paymentStatus: remote.paymentStatus,
+      status: remote.status,
+      voidReason: remote.voidReason,
+      codCollectedAt: remote.codCollectedAt,
+      codCollectedById,
+      onlineOrderNumber: remote.onlineOrderNumber,
+      createdById,
+    };
+
+    let existingSale = await prisma.sale.findUnique({
+      where: { id: remote.id },
+    });
+
+    if (!existingSale) {
+      existingSale = await prisma.sale.findUnique({
+        where: { saleNumber: remote.saleNumber },
+      });
+    }
+
+    if (existingSale) {
+      await prisma.sale.update({
+        where: { id: existingSale.id },
+        data: saleData,
+      });
+      saleMap.set(remote.id, existingSale.id);
+    } else {
+      const created = await prisma.sale.create({
+        data: ({
+          id: remote.id,
+          ...saleData,
+          createdAt: remote.createdAt,
+        } as any),
+      });
+      saleMap.set(remote.id, created.id);
+    }
+
+    for (const item of remote.items) {
+      const productId = productMap.get(item.productId) ?? item.productId;
+
+      const product = await prisma.product.findUnique({
+        where: { id: productId },
+      });
+
+      if (!product) {
+        console.warn(
+          `[pull] Skipping sale item ${item.id}: product mapping missing`
+        );
+        continue;
+      }
+
+      const localSaleId = saleMap.get(remote.id);
+      if (!localSaleId) continue;
+
+      await prisma.saleItem.upsert({
+        where: { id: item.id },
+        create: {
+          id: item.id,
+          saleId: localSaleId,
+          productId: product.id,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          discount: item.discount,
+          subtotal: item.subtotal,
+          cogsTotal: item.cogsTotal,
+        },
+        update: {
+          saleId: localSaleId,
+          productId: product.id,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          discount: item.discount,
+          subtotal: item.subtotal,
+          cogsTotal: item.cogsTotal,
+        },
+      });
+
+      for (const bc of item.batchConsumptions) {
+        const batch = await prisma.productBatch.findUnique({
+          where: { id: bc.batchId },
+        });
+
+        if (!batch) {
+          console.warn(
+            `[pull] Skipping batch consumption ${bc.id}: batch missing`
+          );
+          continue;
+        }
+
+        await prisma.saleItemBatchConsumption.upsert({
+          where: { id: bc.id },
+          create: {
+            id: bc.id,
+            saleItemId: item.id,
+            batchId: batch.id,
+            quantityConsumed: bc.quantityConsumed,
+            unitCost: bc.unitCost,
+          },
+          update: {
+            saleItemId: item.id,
+            batchId: batch.id,
+            quantityConsumed: bc.quantityConsumed,
+            unitCost: bc.unitCost,
+          },
+        });
+      }
+    }
+  }
+
+  // ============================================================
+  // EXPENSES
+  // ============================================================
+
+  const remoteExpenses = await neonPrisma.expense.findMany({
+    orderBy: { createdAt: "asc" },
+  });
+
+  for (const remote of remoteExpenses) {
+    // ------------------------------------------------------------
+    // EXPENSE CATEGORY
+    // ------------------------------------------------------------
+
+    let category = await prisma.expenseCategory.findUnique({
+      where: { id: remote.categoryId },
+    });
+
+    // Neon and Electron may have different category IDs.
+    // Match by category name when the IDs differ.
+    if (!category) {
+      const remoteCategory = await neonPrisma.expenseCategory.findUnique({
+        where: { id: remote.categoryId },
+      });
+
+      if (remoteCategory) {
+        category = await prisma.expenseCategory.findUnique({
+          where: { name: remoteCategory.name },
         });
       }
     }
 
-    if (!localCreatedBy) {
+    if (!category) {
       console.warn(
-        `[pull] Skipping return ${remote.returnNumber}: creator mapping missing`
+        `[pull] Skipping expense ${remote.id}: category missing`
       );
       continue;
     }
 
-    // ----------------------------------------------------------
-    // Upsert RETURN header.
-    // Match by ID first, then by returnNumber.
-    // ----------------------------------------------------------
-    let localReturn = await prisma.return.findUnique({
+    let createdById = remote.createdById;
+
+    const user = await prisma.user.findUnique({
+      where: { id: remote.createdById },
+    });
+
+    if (!user) {
+      const remoteUser = await neonPrisma.user.findUnique({
+        where: { id: remote.createdById },
+      });
+
+      if (remoteUser) {
+        const matched = await prisma.user.findUnique({
+          where: { username: remoteUser.username },
+        });
+
+        if (matched) createdById = matched.id;
+      }
+    }
+
+    await prisma.expense.upsert({
       where: { id: remote.id },
-    });
-
-    if (!localReturn) {
-      localReturn = await prisma.return.findUnique({
-        where: { returnNumber: remote.returnNumber },
-      });
-    }
-
-    if (localReturn) {
-      localReturn = await prisma.return.update({
-        where: { id: localReturn.id },
-        data: {
-          returnNumber: remote.returnNumber,
-          saleId: localSale.id,
-          customerId: localCustomerId,
-          returnDate: remote.returnDate,
-          totalRefund: remote.totalRefund,
-          reason: remote.reason,
-          createdById: localCreatedBy.id,
-          createdAt: remote.createdAt,
-        },
-      });
-    } else {
-      localReturn = await prisma.return.create({
-        data: {
-          id: remote.id,
-          returnNumber: remote.returnNumber,
-          saleId: localSale.id,
-          customerId: localCustomerId,
-          returnDate: remote.returnDate,
-          totalRefund: remote.totalRefund,
-          reason: remote.reason,
-          createdById: localCreatedBy.id,
-          createdAt: remote.createdAt,
-        },
-      });
-    }
-
-    // ----------------------------------------------------------
-    // Pull every ReturnItem.
-    // ----------------------------------------------------------
-    for (const remoteItem of remote.items) {
-      // Product mapping.
-      let localProduct = await prisma.product.findUnique({
-        where: { id: remoteItem.productId },
-      });
-
-      if (!localProduct) {
-        const remoteProduct = await neonPrisma.product.findUnique({
-          where: { id: remoteItem.productId },
-          select: {
-            id: true,
-            name: true,
-          },
-        });
-
-        if (remoteProduct) {
-          localProduct = await prisma.product.findFirst({
-            where: { name: remoteProduct.name },
-          });
-        }
-      }
-
-      if (!localProduct) {
-        console.warn(
-          `[pull] Skipping ReturnItem ${remoteItem.id}: product mapping missing`
-        );
-        continue;
-      }
-
-      // SaleItem should normally have the same ID because sale pulling
-      // preserves the remote SaleItem ID. Fall back to product + sale.
-      let localSaleItem = await prisma.saleItem.findUnique({
-        where: { id: remoteItem.saleItemId },
-      });
-
-      if (!localSaleItem) {
-        localSaleItem = await prisma.saleItem.findFirst({
-          where: {
-            saleId: localSale.id,
-            productId: localProduct.id,
-          },
-          orderBy: {
-            id: "asc",
-          },
-        });
-      }
-
-      if (!localSaleItem) {
-        console.warn(
-          `[pull] Skipping ReturnItem ${remoteItem.id}: sale item mapping missing`
-        );
-        continue;
-      }
-
-      // targetBatchId is optional. Only use it if that batch exists locally.
-      let localTargetBatchId: string | null = null;
-
-      if (remoteItem.targetBatchId) {
-        const localBatch = await prisma.productBatch.findUnique({
-          where: { id: remoteItem.targetBatchId },
-          select: { id: true },
-        });
-
-        if (localBatch) {
-          localTargetBatchId = localBatch.id;
-        }
-      }
-
-      await prisma.returnItem.upsert({
-        where: {
-          id: remoteItem.id,
-        },
-        create: {
-          id: remoteItem.id,
-          returnId: localReturn.id,
-          saleItemId: localSaleItem.id,
-          productId: localProduct.id,
-          quantity: remoteItem.quantity,
-          condition: remoteItem.condition,
-          refundAmount: remoteItem.refundAmount,
-          targetBatchId: localTargetBatchId,
-        },
-        update: {
-          returnId: localReturn.id,
-          saleItemId: localSaleItem.id,
-          productId: localProduct.id,
-          quantity: remoteItem.quantity,
-          condition: remoteItem.condition,
-          refundAmount: remoteItem.refundAmount,
-          targetBatchId: localTargetBatchId,
-        },
-      });
-    }
-
-    // ----------------------------------------------------------
-    // Prevent the pulled return from being sent back to Neon.
-    // ----------------------------------------------------------
-    await prisma.syncQueue.deleteMany({
-      where: {
-        entityType: "RETURN",
-        entityId: localReturn.id,
-        syncStatus: {
-          in: ["PENDING", "FAILED"],
-        },
-      },
-    });
-
-    await prisma.syncQueue.upsert({
-      where: {
-        id: `pull-return-${localReturn.id}`,
-      },
       create: {
-        id: `pull-return-${localReturn.id}`,
-        entityType: "RETURN",
-        entityId: localReturn.id,
-        operationType: "PULL",
-        payload: JSON.stringify({
-          id: localReturn.id,
-          source: "NEON",
-        }),
-        syncStatus: "SYNCED",
-        syncedAt: new Date(),
+        id: remote.id,
+        expenseNumber: remote.expenseNumber,
+        categoryId: category.id,
+        description: remote.description,
+        amount: remote.amount,
+        expenseDate: remote.expenseDate,
+        paymentMethod: remote.paymentMethod,
+        reference: remote.reference,
+        notes: remote.notes,
+        status: remote.status,
+        createdById,
+        createdAt: remote.createdAt,
       },
       update: {
-        syncStatus: "SYNCED",
-        syncedAt: new Date(),
-        errorMessage: null,
+        expenseNumber: remote.expenseNumber,
+        categoryId: category.id,
+        description: remote.description,
+        amount: remote.amount,
+        expenseDate: remote.expenseDate,
+        paymentMethod: remote.paymentMethod,
+        reference: remote.reference,
+        notes: remote.notes,
+        status: remote.status,
+        createdById,
       },
     });
-
-    pulled++;
-
-    console.log(
-      `[pull] RETURN ${remote.returnNumber} -> Electron OK`
-    );
   }
+
+  // ============================================================
+  // CASH TRANSACTIONS
+  // ============================================================
+
+  const remoteCashTransactions =
+    await neonPrisma.cashTransaction.findMany({
+      orderBy: { createdAt: "asc" },
+    });
+
+  for (const remote of remoteCashTransactions) {
+    let createdById = remote.createdById;
+
+    const user = await prisma.user.findUnique({
+      where: { id: remote.createdById },
+    });
+
+    if (!user) {
+      const remoteUser = await neonPrisma.user.findUnique({
+        where: { id: remote.createdById },
+      });
+
+      if (remoteUser) {
+        const matched = await prisma.user.findUnique({
+          where: { username: remoteUser.username },
+        });
+
+        if (matched) createdById = matched.id;
+      }
+    }
+
+    await prisma.cashTransaction.upsert({
+      where: { id: remote.id },
+      create: {
+        id: remote.id,
+        type: remote.type,
+        amount: remote.amount,
+        transactionDate: remote.transactionDate,
+        note: remote.note,
+        createdById,
+        createdAt: remote.createdAt,
+      },
+      update: {
+        type: remote.type,
+        amount: remote.amount,
+        transactionDate: remote.transactionDate,
+        note: remote.note,
+        createdById,
+      },
+    });
+  }
+
+  // ============================================================
+  // SUPPLIER PAYMENTS
+  // ============================================================
+
+  const remoteSupplierPayments =
+    await neonPrisma.supplierPayment.findMany({
+      orderBy: { createdAt: "asc" },
+    });
+
+  for (const remote of remoteSupplierPayments) {
+    let supplierId = remote.supplierId;
+
+    const supplier = await prisma.supplier.findUnique({
+      where: { id: supplierId },
+    });
+
+    if (!supplier) {
+      const remoteSupplier = await neonPrisma.supplier.findUnique({
+        where: { id: remote.supplierId },
+      });
+
+      if (remoteSupplier) {
+        const matched = await prisma.supplier.findFirst({
+          where: { phone: remoteSupplier.phone },
+        });
+
+        if (matched) supplierId = matched.id;
+      }
+    }
+
+    if (!await prisma.supplier.findUnique({ where: { id: supplierId } })) {
+      console.warn(
+        `[pull] Skipping supplier payment ${remote.id}: supplier missing`
+      );
+      continue;
+    }
+
+    const purchaseId = remote.purchaseId
+      ? purchaseMap.get(remote.purchaseId) ?? remote.purchaseId
+      : null;
+
+    let createdById = remote.createdById;
+
+    const user = await prisma.user.findUnique({
+      where: { id: remote.createdById },
+    });
+
+    if (!user) {
+      const remoteUser = await neonPrisma.user.findUnique({
+        where: { id: remote.createdById },
+      });
+
+      if (remoteUser) {
+        const matched = await prisma.user.findUnique({
+          where: { username: remoteUser.username },
+        });
+
+        if (matched) createdById = matched.id;
+      }
+    }
+
+    await prisma.supplierPayment.upsert({
+      where: { id: remote.id },
+      create: {
+        id: remote.id,
+        paymentNumber: remote.paymentNumber,
+        supplierId,
+        purchaseId,
+        amount: remote.amount,
+        paymentDate: remote.paymentDate,
+        method: remote.method,
+        reference: remote.reference,
+        notes: remote.notes,
+        createdById,
+        createdAt: remote.createdAt,
+      },
+      update: {
+        paymentNumber: remote.paymentNumber,
+        supplierId,
+        purchaseId,
+        amount: remote.amount,
+        paymentDate: remote.paymentDate,
+        method: remote.method,
+        reference: remote.reference,
+        notes: remote.notes,
+        createdById,
+      },
+    });
+  }
+
+  // ============================================================
+  // STOCK MOVEMENTS
+  // ============================================================
+
+  const remoteStockMovements =
+    await neonPrisma.stockMovement.findMany({
+      orderBy: { createdAt: "asc" },
+    });
+
+  for (const remote of remoteStockMovements) {
+    const productId =
+      productMap.get(remote.productId) ?? remote.productId;
+
+    let createdById = remote.userId;
+
+    const localStockUser = await prisma.user.findUnique({
+      where: { id: remote.userId },
+    });
+
+    if (!localStockUser && remote.userId) {
+      const remoteStockUser = await neonPrisma.user.findUnique({
+        where: { id: remote.userId },
+      });
+
+      if (remoteStockUser) {
+        const matchedStockUser = await prisma.user.findUnique({
+          where: { username: remoteStockUser.username },
+        });
+
+        if (matchedStockUser) {
+          createdById = matchedStockUser.id;
+        }
+      }
+    }
+
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+    });
+
+    if (!product) {
+      console.warn(
+        `[pull] Skipping stock movement ${remote.id}: product missing`
+      );
+      continue;
+    }
+
+    let batchId = remote.batchId ?? null;
+
+    if (batchId) {
+      const batch = await prisma.productBatch.findUnique({
+        where: { id: batchId },
+      });
+
+      if (!batch) batchId = null;
+    }
+
+    await prisma.stockMovement.upsert({
+      where: { id: remote.id },
+      create: {
+        id: remote.id,
+        productId,
+        batchId,
+        movementType: remote.movementType,
+        quantity: remote.quantity,
+        previousQuantity: remote.previousQuantity,
+        newQuantity: remote.newQuantity,
+        referenceId: remote.referenceId,
+        userId: createdById,
+        notes: remote.notes,
+        createdAt: remote.createdAt,
+      },
+      update: {
+        productId,
+        batchId,
+        movementType: remote.movementType,
+        quantity: remote.quantity,
+        previousQuantity: remote.previousQuantity,
+        newQuantity: remote.newQuantity,
+        referenceId: remote.referenceId,
+        userId: createdById,
+        notes: remote.notes,
+      },
+    });
+  }
+
+  // ============================================================
+  // SUPPLIER RETURNS
+  // ============================================================
+
+  const remoteSupplierReturns =
+    await neonPrisma.supplierReturn.findMany({
+      orderBy: { createdAt: "asc" },
+    });
+
+  for (const remote of remoteSupplierReturns) {
+    // ------------------------------------------------------------
+    // SUPPLIER
+    // ------------------------------------------------------------
+
+    let supplierId = remote.supplierId;
+
+    let supplier = await prisma.supplier.findUnique({
+      where: { id: supplierId },
+    });
+
+    if (!supplier) {
+      const remoteSupplier = await neonPrisma.supplier.findUnique({
+        where: { id: remote.supplierId },
+      });
+
+      if (remoteSupplier) {
+        const matched = await prisma.supplier.findFirst({
+          where: { phone: remoteSupplier.phone },
+        });
+
+        if (matched) {
+          supplierId = matched.id;
+          supplier = matched;
+        }
+      }
+    }
+
+    if (!supplier) {
+      console.warn(
+        `[pull] Skipping supplier return ${remote.id}: supplier missing`
+      );
+      continue;
+    }
+
+    // ------------------------------------------------------------
+    // PRODUCT
+    // ------------------------------------------------------------
+
+    const product = await prisma.product.findUnique({
+      where: { id: remote.productId },
+    });
+
+    if (!product) {
+      console.warn(
+        `[pull] Skipping supplier return ${remote.id}: product ${remote.productId} missing`
+      );
+      continue;
+    }
+
+    const productId = product.id;
+
+    // ------------------------------------------------------------
+    // BATCH
+    // ------------------------------------------------------------
+
+    const batch = await prisma.productBatch.findUnique({
+      where: { id: remote.batchId },
+    });
+
+    if (!batch) {
+      console.warn(
+        `[pull] Skipping supplier return ${remote.id}: batch ${remote.batchId} missing`
+      );
+      continue;
+    }
+
+    const batchId = batch.id;
+
+    // ------------------------------------------------------------
+    // CREATED BY USER
+    // ------------------------------------------------------------
+
+    let createdById = remote.createdById;
+
+    let user = await prisma.user.findUnique({
+      where: { id: remote.createdById },
+    });
+
+    if (!user) {
+      const remoteUser = await neonPrisma.user.findUnique({
+        where: { id: remote.createdById },
+      });
+
+      if (remoteUser) {
+        const matched = await prisma.user.findUnique({
+          where: { username: remoteUser.username },
+        });
+
+        if (matched) {
+          createdById = matched.id;
+          user = matched;
+        }
+      }
+    }
+
+    if (!user) {
+      console.warn(
+        `[pull] Skipping supplier return ${remote.id}: createdBy user missing`
+      );
+      continue;
+    }
+
+    // ------------------------------------------------------------
+    // PURCHASE
+    // ------------------------------------------------------------
+
+    const purchaseId = remote.purchaseId
+      ? purchaseMap.get(remote.purchaseId) ?? remote.purchaseId
+      : null;
+
+    if (purchaseId) {
+      const purchase = await prisma.purchase.findUnique({
+        where: { id: purchaseId },
+      });
+
+      if (!purchase) {
+        console.warn(
+          `[pull] Skipping supplier return ${remote.id}: purchase ${purchaseId} missing`
+        );
+        continue;
+      }
+    }
+
+    // ------------------------------------------------------------
+    // UPSERT
+    // ------------------------------------------------------------
+
+    await prisma.supplierReturn.upsert({
+      where: { id: remote.id },
+
+      create: {
+        id: remote.id,
+        returnNumber: remote.returnNumber,
+        supplierId,
+        purchaseId: purchaseId!,
+        productId,
+        batchId,
+        quantity: remote.quantity,
+        unitCost: remote.unitCost,
+        returnValue: remote.returnValue,
+        returnDate: remote.returnDate,
+        reason: remote.reason,
+        notes: remote.notes,
+        settlementType: remote.settlementType,
+        status: remote.status,
+        createdById,
+        createdAt: remote.createdAt,
+        updatedAt: remote.updatedAt,
+        cancelReason: remote.cancelReason,
+      },
+
+      update: {
+        returnNumber: remote.returnNumber,
+        supplierId,
+        purchaseId: purchaseId!,
+        productId,
+        batchId,
+        quantity: remote.quantity,
+        unitCost: remote.unitCost,
+        returnValue: remote.returnValue,
+        returnDate: remote.returnDate,
+        reason: remote.reason,
+        notes: remote.notes,
+        settlementType: remote.settlementType,
+        status: remote.status,
+        createdById,
+        updatedAt: remote.updatedAt,
+        cancelReason: remote.cancelReason,
+      },
+    });
+  }
+
+  console.log(
+    `[pull] Completed full Neon -> Electron reconciliation`
+  );
 
   return {
     pulled,
   };
 }
 
+export async function syncPendingChanges() {
+  // Reconcile ALL local Electron sales before processing the queue.
+  // This repairs historical sales that were created before SALE
+  // synchronization existed.
+  await enqueueMissingSales();
 
-/**
- * Reconcile bKash transactions from Neon -> Electron.
- *
- * IMPORTANT:
- * syncBkashTransaction() handles Electron -> Neon only.
- * This reconciliation handles the opposite direction so that a
- * transaction created online (for example a supplier cash refund)
- * cannot leave the two bKash ledgers permanently different.
- *
- * The operation is idempotent:
- * - existing local transaction IDs are updated, never duplicated
- * - missing Neon transactions are inserted locally
- * - remote user IDs are mapped to local users by username
- */
-async function reconcileNeonBkashTransactions() {
-  const remoteTransactions = await neonPrisma.bkashTransaction.findMany({
-    orderBy: {
-      transactionDate: "asc",
+  // Reconcile Product records before processing the queue.
+  // This catches products created/updated by paths that did not
+  // explicitly create a syncQueue entry.
+  await enqueueMissingProducts();
+
+  // Reconcile Purchase records before processing the queue.
+  // This catches historical purchases and purchases created by
+  // code paths that did not explicitly call enqueueSync().
+  await enqueueMissingPurchases();
+
+  // Reconcile CashTransaction records before processing the queue.
+  // This catches cash records created by older/newer service paths
+  // that did not explicitly call enqueueSync().
+  await enqueueMissingCashTransactions();
+
+  // Reconcile historical supplier payments before processing the queue.
+  await enqueueMissingSupplierPayments();
+
+  const items = await prisma.syncQueue.findMany({
+    where: {
+      syncStatus: {
+        in: ["PENDING", "FAILED"],
+      },
     },
+    orderBy: {
+      createdAt: "asc",
+    },
+    take: BATCH_SIZE,
   });
 
-  let created = 0;
-  let updated = 0;
-  let skipped = 0;
-
-  for (const remote of remoteTransactions) {
-    /*
-     * The local database can have different user IDs from Neon.
-     * Resolve the Neon creator to the corresponding local user.
-     */
-    let localUser = await prisma.user.findUnique({
-      where: { id: remote.createdById },
-    });
-
-    if (!localUser) {
-      const remoteUser = await neonPrisma.user.findUnique({
-        where: { id: remote.createdById },
-        select: {
-          username: true,
-        },
-      });
-
-      if (remoteUser?.username) {
-        localUser = await prisma.user.findUnique({
-          where: {
-            username: remoteUser.username,
-          },
-        });
-      }
-    }
-
-    if (!localUser) {
-      console.warn(
-        `[sync] Cannot pull bKash transaction ${remote.id}: ` +
-        `local creator user could not be resolved.`
-      );
-      skipped++;
-      continue;
-    }
-
-    const existing = await prisma.bkashTransaction.findUnique({
-      where: {
-        id: remote.id,
-      },
-    });
-
-    if (existing) {
-      /*
-       * Keep the local ledger identical to Neon for the same
-       * transaction ID. Do not create a second transaction.
-       */
-      await prisma.bkashTransaction.update({
-        where: {
-          id: remote.id,
-        },
-        data: {
-          type: remote.type,
-          amount: remote.amount,
-          transactionDate: remote.transactionDate,
-          note: remote.note,
-          createdById: localUser.id,
-          createdAt: remote.createdAt,
-          updatedAt: remote.updatedAt,
-        },
-      });
-
-      updated++;
-      continue;
-    }
-
-    /*
-     * Missing locally -> create it with the SAME transaction ID.
-     * This is what repairs the existing SR-000001 +৳500 refund.
-     */
-    await prisma.bkashTransaction.create({
-      data: {
-        id: remote.id,
-        type: remote.type,
-        amount: remote.amount,
-        transactionDate: remote.transactionDate,
-        note: remote.note,
-        createdById: localUser.id,
-        createdAt: remote.createdAt,
-        updatedAt: remote.updatedAt,
-      },
-    });
-
-    /*
-     * Mark the pulled transaction as synchronized locally so the
-     * normal Electron -> Neon queue does not try to push it back.
-     */
-    await prisma.syncQueue.deleteMany({
-      where: {
-        entityType: "BKASH_TRANSACTION",
-        entityId: remote.id,
-        syncStatus: {
-          in: ["PENDING", "FAILED"],
-        },
-      },
-    });
-
-    await prisma.syncQueue.create({
-      data: {
-        entityType: "BKASH_TRANSACTION",
-        entityId: remote.id,
-        operationType: "PULL",
-        payload: JSON.stringify({
-          id: remote.id,
-          source: "NEON",
-        }),
-        syncStatus: "SYNCED",
-        syncedAt: new Date(),
-      },
-    });
-
-    created++;
+  if (items.length === 0) {
+    return {
+      synced: 0,
+      failed: 0,
+      pending: 0,
+    };
   }
-
-  if (created || updated || skipped) {
-    console.log(
-      `[sync] bKash reconciliation: ` +
-      `${created} created locally, ${updated} updated, ${skipped} skipped.`
-    );
-  }
-
-  return {
-    created,
-    updated,
-    skipped,
-  };
-}
-
-export async function syncPendingChanges() {
-  /*
-   * Reconcile the Neon bKash ledger first.
-   *
-   * This prevents legitimate online transactions such as supplier
-   * refund cash-ins from being absent from the Electron balance.
-   */
-  try {
-    await reconcileNeonBkashTransactions();
-  } catch (error) {
-    console.warn(
-      "[sync] Neon -> Electron bKash reconciliation failed:",
-      error
-    );
-  }
-
-  /*
-   * POS -> Neon synchronization.
-   *
-   * Always reconcile local sales first, then drain the queue.
-   * A single failed item must never prevent the remaining POS data
-   * from reaching Neon.
-   */
-  // Sales reconciliation performs remote Neon lookups. A temporary
-  // Neon connection failure must not crash the entire sync cycle.
-  try {
-    await enqueueMissingSales();
-  } catch (error) {
-    console.warn(
-      "[sync] Sales reconciliation skipped because Neon is temporarily unavailable:",
-      error
-    );
-  }
-
-  await enqueueMissingProducts();
-  await enqueueMissingPurchases();
-  await enqueueMissingExpenses();
-  await enqueueMissingReturns();
-  await enqueueMissingCashTransactions();
-  await enqueueMissingSupplierPayments();
 
   let synced = 0;
   let failed = 0;
 
-  /*
-   * Drain multiple batches so a large number of POS sales can be
-   * synchronized in the same sync cycle.
-   */
-  for (let pass = 0; pass < 20; pass++) {
-    const items = await prisma.syncQueue.findMany({
-      where: {
-        syncStatus: {
-          in: ["PENDING", "FAILED"],
+  for (const item of items) {
+    try {
+      await prisma.syncQueue.update({
+        where: {
+          id: item.id,
         },
-      },
-      orderBy: {
-        createdAt: "asc",
-      },
-      take: BATCH_SIZE,
-    });
+        data: {
+          syncStatus: "SYNCING",
+          errorMessage: null,
+        },
+      });
 
-    if (items.length === 0) {
-      break;
-    }
+      await syncQueueItem(item);
 
-    for (const item of items) {
-      try {
-        await prisma.syncQueue.update({
-          where: { id: item.id },
-          data: {
-            syncStatus: "SYNCING",
-            errorMessage: null,
-          },
-        });
+      await prisma.syncQueue.update({
+        where: {
+          id: item.id,
+        },
+        data: {
+          syncStatus: "SYNCED",
+          syncedAt: new Date(),
+          errorMessage: null,
+        },
+      });
 
-        await syncQueueItem(item);
+      synced++;
+    } catch (error) {
+      failed++;
 
-        await prisma.syncQueue.update({
-          where: { id: item.id },
-          data: {
-            syncStatus: "SYNCED",
-            syncedAt: new Date(),
-            errorMessage: null,
-          },
-        });
-
-        synced++;
-
-        console.log(
-          `[sync] ${item.entityType} ${item.entityId} -> Neon OK`
-        );
-      } catch (error) {
-        failed++;
-
-        const message =
-          error instanceof Error
-            ? error.message
-            : String(error);
-
-        await prisma.syncQueue.update({
-          where: { id: item.id },
-          data: {
-            syncStatus: "FAILED",
-            errorMessage: message,
-          },
-        });
-
-        console.error(
-          `[sync] ${item.entityType} ${item.entityId} -> Neon FAILED: ${message}`
-        );
-      }
-    }
-
-    /*
-     * If this batch contained only failed records, don't spin forever.
-     */
-    if (items.every(async () => false)) {
-      break;
+      await prisma.syncQueue.update({
+        where: {
+          id: item.id,
+        },
+        data: {
+          syncStatus: "FAILED",
+          errorMessage:
+            error instanceof Error
+              ? error.message
+              : String(error),
+        },
+      });
     }
   }
 
   const pending = await prisma.syncQueue.count({
     where: {
-      syncStatus: {
-        in: ["PENDING", "FAILED", "SYNCING"],
-      },
+      syncStatus: "PENDING",
     },
   });
-
-  console.log(
-    `[sync] completed: synced=${synced}, failed=${failed}, pending=${pending}`
-  );
 
   return {
     synced,

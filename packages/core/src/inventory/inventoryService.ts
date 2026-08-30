@@ -213,7 +213,6 @@ export async function consumeFifo(
     userId: string;
     referenceType: string;
     referenceId: string;
-    enqueueBatchSync?: boolean;
   }
 ): Promise<BatchConsumption[]> {
   let remaining = new Prisma.Decimal(params.quantity);
@@ -257,7 +256,6 @@ export async function consumeFifo(
       },
     });
 
-      if (params.enqueueBatchSync !== false) {
       await enqueueSync(
         "PRODUCT_BATCH",
         batch.id,
@@ -281,7 +279,6 @@ export async function consumeFifo(
         },
         tx
       );
-    }
 
     await recordStockMovement(tx, {
       productId: params.productId,

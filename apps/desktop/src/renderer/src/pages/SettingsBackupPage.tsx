@@ -48,6 +48,7 @@ export function SettingsBackupPage() {
 
   useEffect(() => {
     load();
+    loadAppVersion();
   }, []);
 
   // ============================================================
@@ -185,6 +186,117 @@ export function SettingsBackupPage() {
       );
     } finally {
       setResetting(false);
+    }
+  }
+
+
+  // ============================================================
+  // APPLICATION UPDATES
+  // ============================================================
+
+  const [appVersion, setAppVersion] = useState("0.1.0");
+  const [updateStatus, setUpdateStatus] = useState<
+    | "idle"
+    | "checking"
+    | "available"
+    | "downloading"
+    | "downloaded"
+    | "not-available"
+    | "error"
+  >("idle");
+  const [availableVersion, setAvailableVersion] = useState("");
+  const [updatePercent, setUpdatePercent] = useState(0);
+  const [updateBusy, setUpdateBusy] = useState(false);
+
+  async function loadAppVersion() {
+    try {
+      const result = await call<{ version: string }>("app:version");
+      setAppVersion(result.version);
+    } catch {
+      // Browser mode fallback.
+    }
+  }
+
+  async function checkForUpdate() {
+    setUpdateBusy(true);
+    setUpdateStatus("checking");
+
+    try {
+      const result = await call<{
+        status: string;
+        version?: string;
+        message?: string;
+        percent?: number;
+      }>("app:update:check");
+
+      if (result.status === "available") {
+        setAvailableVersion(result.version ?? "");
+        setUpdateStatus("available");
+        push(
+          `Version ${result.version ?? "new"} is available.`,
+          "success"
+        );
+      } else if (result.status === "not-available") {
+        setAvailableVersion(result.version ?? appVersion);
+        setUpdateStatus("not-available");
+        push("Torki Bazar is already up to date.", "success");
+      } else {
+        setUpdateStatus("error");
+        push(
+          result.message ?? "Could not check for updates.",
+          "error"
+        );
+      }
+    } catch (error) {
+      setUpdateStatus("error");
+      push(
+        error instanceof Error
+          ? error.message
+          : "Could not check for updates.",
+        "error"
+      );
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function downloadAndInstallUpdate() {
+    setUpdateBusy(true);
+    setUpdateStatus("downloading");
+    setUpdatePercent(0);
+
+    try {
+      const result = await call<{
+        status: string;
+        version?: string;
+        percent?: number;
+      }>("app:update:download");
+
+      setUpdatePercent(result.percent ?? 100);
+
+      if (result.status === "downloaded") {
+        setUpdateStatus("downloaded");
+        push(
+          "Update downloaded. Restarting to install it...",
+          "success"
+        );
+
+        setTimeout(() => {
+          void call("app:update:install");
+        }, 500);
+      } else {
+        setUpdateStatus(result.status as typeof updateStatus);
+      }
+    } catch (error) {
+      setUpdateStatus("error");
+      push(
+        error instanceof Error
+          ? error.message
+          : "Update download failed.",
+        "error"
+      );
+    } finally {
+      setUpdateBusy(false);
     }
   }
 
@@ -346,6 +458,78 @@ export function SettingsBackupPage() {
           ]}
         />
 
+      </Card>
+
+
+      {/* ============================================================
+          APPLICATION UPDATES
+      ============================================================ */}
+
+      <Card>
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">
+              Application Updates
+            </h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Check for and install the latest Torki Bazar version.
+            </p>
+            <p className="mt-3 text-sm text-slate-600">
+              Current version:{" "}
+              <span className="font-semibold">v{appVersion}</span>
+              {availableVersion && updateStatus === "available"
+                ? ` • New version: v${availableVersion}`
+                : ""}
+            </p>
+          </div>
+
+          <Button
+            type="button"
+            onClick={
+              updateStatus === "available"
+                ? downloadAndInstallUpdate
+                : checkForUpdate
+            }
+            disabled={
+              updateBusy ||
+              updateStatus === "downloaded"
+            }
+          >
+            {updateBusy
+              ? updateStatus === "downloading"
+                ? `Downloading ${updatePercent}%`
+                : "Checking..."
+              : updateStatus === "available"
+                ? "Download & Install Update"
+                : "Check for Updates"}
+          </Button>
+        </div>
+
+        {updateStatus === "downloading" && (
+          <p className="mt-4 rounded-xl bg-blue-50 px-4 py-3 text-sm text-blue-700">
+            Downloading update: {updatePercent}%
+          </p>
+        )}
+
+        {updateStatus === "downloaded" && (
+          <p className="mt-4 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+            Update downloaded. The application is restarting to install it.
+          </p>
+        )}
+
+        {updateStatus === "not-available" && (
+          <p className="mt-4 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+            You are using the latest available version.
+          </p>
+        )}
+
+        {updateStatus === "available" && (
+          <p className="mt-4 rounded-xl bg-blue-50 px-4 py-3 text-sm text-blue-700">
+            Version <strong>{availableVersion}</strong> is available.
+            Click “Download & Install Update” to install it without
+            uninstalling Torki Bazar.
+          </p>
+        )}
       </Card>
 
       {/* ============================================================

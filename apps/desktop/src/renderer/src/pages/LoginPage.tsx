@@ -4,7 +4,7 @@ import { call } from "../api/client";
 import { useAuthStore } from "../store/authStore";
 import { Button } from "../components/Button";
 import { Field, Input } from "../components/Form";
-import logo from "../assets/torki-bazar-logo.png";
+import logo from "../assets/torki-logo.png";
 
 const REMEMBER_KEY = "torki-bazar-remember-login";
 

@@ -19,3 +19,10 @@ packages/database/prisma/*.db.*
 # Backup files
 *.backup
 *.save
+
+# Local V1.5 temporary backups and generated artifacts
+backups/
+apps/desktop/build/
+**/*.before-*
+packages/core/dist.backup-*/
+packages/core/src/**/*.js
