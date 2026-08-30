@@ -10,7 +10,8 @@
     "migrate:dev": "prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
     "seed": "ts-node --transpile-only src/seed.ts",
-    "studio": "prisma studio"
+    "studio": "prisma studio",
+    "generate:postgres": "prisma generate --schema=prisma/schema.postgres.prisma"
   },
   "dependencies": {
     "@prisma/client": "^5.20.0",

@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run generate:postgres --workspace=@torki-bazar/database && tsc -p tsconfig.json",
     "start": "node dist/index.js"
   },
   "dependencies": {
