@@ -602,6 +602,11 @@ async function startServer() {
     // MEMBERSHIP
     // ==========================================================
 
+    // Read-only membership list for the Online Portal.
+    // Windows SQLite -> Neon -> Online Portal.
+    if (channel === "membership:list")
+      return core.listMemberships(session);
+
     if (channel === "membership:issue")
       return core.issueMembership(session, payload);
 
