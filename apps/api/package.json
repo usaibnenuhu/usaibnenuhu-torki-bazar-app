@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run build --workspace=@torki-bazar/shared && npm run build --workspace=@torki-bazar/database && npm run build --workspace=@torki-bazar/core && tsc -p tsconfig.json",
     "start": "node dist/index.js"
   },
   "dependencies": {
