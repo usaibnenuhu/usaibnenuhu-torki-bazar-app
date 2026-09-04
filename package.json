@@ -1,6 +1,6 @@
 {
   "name": "torki-bazar-retail-management-system",
-  "version": "0.1.48",
+  "version": "0.1.49",
   "private": true,
   "workspaces": [
     "apps/*",

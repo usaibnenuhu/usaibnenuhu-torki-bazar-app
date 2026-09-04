@@ -306,13 +306,13 @@ async function bootstrap() {
       "[main] Fresh production installation detected. Pulling existing Neon data..."
     );
 
-    const { pullRemoteChanges } =
+    const { pullFreshNeonSnapshot } =
       await import("@torki-bazar/core");
 
-    const result = await pullRemoteChanges();
+    const result = await pullFreshNeonSnapshot();
 
     console.log(
-      `[main] Initial Neon data pull complete. Records pulled: ${result.pulled}`
+      `[main] Initial Neon snapshot complete. Records copied: ${result.pulled}`
     );
   }
 
