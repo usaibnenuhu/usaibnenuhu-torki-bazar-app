@@ -13,6 +13,8 @@ import { PrismaClient as PostgresPrismaClient, Prisma } from "@prisma/client";
  */
 
 const usePostgres =
+  process.env.NEON_DATABASE_URL?.startsWith("postgres") === true ||
+  process.env.NEON_DATABASE_URL?.startsWith("postgresql") === true ||
   process.env.DATABASE_URL?.startsWith("postgres") === true ||
   process.env.DATABASE_URL?.startsWith("postgresql") === true;
 
