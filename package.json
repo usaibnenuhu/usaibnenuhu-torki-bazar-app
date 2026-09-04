@@ -1,16 +1,20 @@
 {
   "name": "torki-bazar-retail-management-system",
-  "version": "0.1.45",
+  "version": "0.1.48",
   "private": true,
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "scripts": {
-    "build": "electron-vite build --config apps/desktop/electron.vite.config.ts",
-    "dist:win": "electron-vite build --config apps/desktop/electron.vite.config.ts && electron-builder --config electron-builder.yml --win"
+    "build": "npm run build:database && npm run build:core && electron-vite build --config apps/desktop/electron.vite.config.ts",
+    "dist:win": "npm run build && electron-builder --config electron-builder.yml --win",
+    "build:database": "npm --prefix packages/database run build",
+    "build:core": "npm --prefix packages/core run build"
   },
   "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "electron-updater": "^6.8.9",

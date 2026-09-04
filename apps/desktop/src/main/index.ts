@@ -152,6 +152,10 @@ async function bootstrap() {
    *   Neon   -> SQLite
    */
 
+  const isFreshProductionInstall =
+    !isDev &&
+    !fs.existsSync(resolveDatabasePath());
+
   const localDatabasePath = isDev
     ? path.resolve(
         __dirname,
@@ -188,6 +192,25 @@ async function bootstrap() {
    *   - batch selling price 0 continues to fall back to Product
    *     selling price according to the existing business logic
    */
+  /*
+   * Load Neon configuration BEFORE importing @torki-bazar/database.
+   * neonClient validates NEON_DATABASE_URL during module initialization.
+   */
+  loadNeonDatabaseUrl();
+
+  if (!process.env.NEON_DATABASE_URL) {
+    console.error(
+      "[main] NEON_DATABASE_URL is not configured."
+    );
+
+    dialog.showErrorBox(
+      "Cloud synchronization configuration missing",
+      "NEON_DATABASE_URL is not configured."
+    );
+
+    return;
+  }
+
   try {
     const { prisma } =
       await import("@torki-bazar/database");
@@ -270,10 +293,33 @@ async function bootstrap() {
 
   await ensureLocalSchema();
 
+  /*
+   * FRESH WINDOWS INSTALL:
+   * The newly-created SQLite database contains only the bundled
+   * template data. Neon contains the existing business data.
+   *
+   * Pull the cloud data once before opening the application so
+   * the new installation starts with the existing business data.
+   */
+  if (isFreshProductionInstall) {
+    console.log(
+      "[main] Fresh production installation detected. Pulling existing Neon data..."
+    );
+
+    const { pullRemoteChanges } =
+      await import("@torki-bazar/core");
+
+    const result = await pullRemoteChanges();
+
+    console.log(
+      `[main] Initial Neon data pull complete. Records pulled: ${result.pulled}`
+    );
+  }
+
   const { registerIpcHandlers } =
     await import("./ipc");
 
-  registerIpcHandlers();
+  await registerIpcHandlers();
 
   createWindow();
 

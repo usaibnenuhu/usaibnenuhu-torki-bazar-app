@@ -10,6 +10,7 @@ directories:
 files:
   - out/**/*
   - node_modules/**/*
+  - node_modules/bcryptjs/**/*
   - node_modules/electron-updater/**/*
   - packages/database/prisma/schema.prisma
   - packages/database/prisma/schema.neon.prisma
@@ -19,6 +20,26 @@ files:
     filter:
       - '**/*'
   - node_modules/@prisma/client/**/*
+  - from: packages/shared
+    to: node_modules/@torki-bazar/shared
+    filter:
+      - package.json
+      - dist/**/*
+  - from: packages/database
+    to: node_modules/@torki-bazar/database
+    filter:
+      - package.json
+      - dist/**/*
+      - prisma/generated/sqlite/**/*
+      - prisma/generated/neon/**/*
+      - prisma/schema.prisma
+      - prisma/schema.neon.prisma
+      - prisma/schema.postgres.prisma
+  - from: packages/core
+    to: node_modules/@torki-bazar/core
+    filter:
+      - package.json
+      - dist/**/*
   - packages/database/prisma/generated/sqlite/**/*
 
 extraResources:
@@ -28,8 +49,6 @@ extraResources:
   - from: apps/desktop/build/neon-config.json
     to: neon-config.json
 
-  - from: packages/database/prisma/generated/sqlite
-    to: database/generated/sqlite
 
 win:
   target:

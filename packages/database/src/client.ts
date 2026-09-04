@@ -12,11 +12,23 @@ import { PrismaClient as PostgresPrismaClient, Prisma } from "@prisma/client";
  * and $transaction overloads do not collapse into `never`.
  */
 
+/*
+ * Runtime database selection:
+ *
+ * Electron desktop MUST always use the local SQLite database as its
+ * operational source of truth. NEON_DATABASE_URL may still be present
+ * in Electron because it is required by neonPrisma for one-way sync.
+ *
+ * Railway/API uses the PostgreSQL DATABASE_URL.
+ */
+const isElectron = Boolean(process.versions?.electron);
+
 const usePostgres =
-  process.env.NEON_DATABASE_URL?.startsWith("postgres") === true ||
-  process.env.NEON_DATABASE_URL?.startsWith("postgresql") === true ||
-  process.env.DATABASE_URL?.startsWith("postgres") === true ||
-  process.env.DATABASE_URL?.startsWith("postgresql") === true;
+  !isElectron &&
+  (process.env.DATABASE_URL?.startsWith("postgres") === true ||
+    process.env.DATABASE_URL?.startsWith("postgresql") === true ||
+    process.env.NEON_DATABASE_URL?.startsWith("postgres") === true ||
+    process.env.NEON_DATABASE_URL?.startsWith("postgresql") === true);
 
 type RuntimePrismaClient =
   | SqlitePrismaClient

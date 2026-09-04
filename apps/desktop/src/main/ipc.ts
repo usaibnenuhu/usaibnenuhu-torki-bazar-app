@@ -1,7 +1,6 @@
 import { ipcMain, app } from "electron";
 import path from "node:path";
 import { AppError } from "@torki-bazar/shared";
-import * as core from "@torki-bazar/core";
 import { getSession, requireSession, setSession } from "./session";
 import { serialize } from "./serialize";
 import { printPosReceipt } from "./receiptPrinter";
@@ -45,7 +44,9 @@ function handle(channel: string, fn: Handler) {
   });
 }
 
-export function registerIpcHandlers() {
+export async function registerIpcHandlers() {
+  const core = await import("@torki-bazar/core");
+
   handle(
     "receipt:print",
     async (input) => printPosReceipt(input)
@@ -1042,17 +1043,14 @@ export function registerIpcHandlers() {
     "sync:run",
     async () => {
       try {
-        // Electron/SQLite -> Neon
-        // PRODUCTION ARCHITECTURE:
-        // Windows local SQLite -> Neon ONLY.
-        //
-        // Never pull Neon data back into the Windows/Mac local DB.
-        // The online portal is a read-only view of Neon.
+        // Normal sync: push local changes first, then pull
+        // changes from Neon into the local SQLite database.
         const pushed = await core.syncPendingChanges();
+        const pulled = await core.pullRemoteChanges();
 
         return {
           ...pushed,
-          pulled: 0,
+          pulled: pulled.pulled,
           error: null,
         };
       } catch (error) {
