@@ -1,0 +1,51 @@
+appId: com.torkibazar.desktop
+productName: Torki Bazar
+executableName: Torki Bazar
+
+directories:
+  app: .
+  output: release
+
+files:
+  - out/**/*
+  - node_modules/**/*
+  - packages/database/prisma/schema.prisma
+  - packages/database/prisma/schema.neon.prisma
+  - packages/database/prisma/schema.postgres.prisma
+  - node_modules/.prisma/client/**/*
+  - node_modules/@prisma/client/**/*
+
+extraResources:
+  - from: apps/desktop/build/database/torki-bazar-template.db
+    to: database/torki-bazar-template.db
+
+  - from: apps/desktop/build/neon-config.json
+    to: neon-config.json
+
+  - from: packages/database/prisma/generated/sqlite
+    to: database/generated/sqlite
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: Torki-Bazar-Setup-${version}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: Torki Bazar
+  menuCategory: Torki Bazar
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+
+publish:
+  provider: github
+  owner: usaibnenuhu
+  repo: usaibnenuhu-torki-bazar-app
+  releaseType: release

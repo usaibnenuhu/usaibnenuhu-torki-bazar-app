@@ -1,0 +1,64 @@
+node_modules/
+.DS_Store
+dist/
+dist-electron/
+.env
+.env.*
+!.env.example
+*.log
+
+packages/database/prisma/*.db
+packages/database/prisma/*.db.*
+*.backup
+*.bak*
+
+# Build output
+**/out/
+**/dist/
+
+# Backup files
+*.backup
+*.save
+
+# Local release/build artifacts
+release/
+
+# Local backup folders
+bank-feature-backup-*/
+bank-final-backup-*/
+bank-integration-backup-*/
+
+# Temporary files accidentally created in project root
+electron-vite
+npm
+tsc
+tsx
+syncService.js
+0.1.11
+1.8
+torki-bazar-retail-management-system@0.1.0
+
+# Development backup/source snapshots
+**/*.before-*
+**/*.backup*
+**/*.old
+**/*.save
+**/*.bak
+**/*.d 2.ts
+
+# Generated/staging artifacts
+**/dist.backup-*/
+apps/desktop/prisma-client-stage/
+packages/database/prisma/generated 2/
+
+# Local generated JavaScript alongside TypeScript source
+packages/core/src/**/*.js
+
+# Local build/staging directories
+**/build/database/*.before-*
+
+# Additional backup snapshots
+apps/desktop/src/main/backups/
+**/*.sales-backup
+**/*.bank-backup
+**/*-backup.prisma

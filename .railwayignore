@@ -1,0 +1,23 @@
+node_modules/
+**/node_modules/
+
+apps/desktop/release/
+**/release/
+
+**/out/
+**/dist/
+
+packages/database/prisma/*.db
+packages/database/prisma/*.db.*
+*.backup
+*.save
+*.bak*
+
+.DS_Store
+*.log
+
+.git/
+
+# Prisma generated clients are created during Railway build
+**/prisma/generated/
+packages/database/prisma/generated/

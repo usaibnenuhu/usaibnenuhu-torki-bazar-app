@@ -1,0 +1,38 @@
+executableName: Torki Bazar
+appId: com.torkibazar.desktop
+productName: Torki Bazar
+
+directories:
+  app: .
+  output: release
+
+files:
+  - out/**
+  - package.json
+  - node_modules/@torki-bazar/core/**
+  - node_modules/@torki-bazar/database/**
+  - node_modules/@torki-bazar/shared/**
+  - node_modules/@prisma/client/**
+  - node_modules/.prisma/**
+  - node_modules/@prisma/get-platform/**
+
+extraResources:
+  - from: build/database/torki-bazar-template.db
+    to: database/torki-bazar-template.db
+
+  - from: build/neon-config.json
+    to: neon-config.json
+
+  - from: ../../packages/database/prisma/generated/sqlite
+    to: database/generated/sqlite
+
+publish:
+  provider: github
+  owner: usaibnenuhu
+  repo: usaibnenuhu-torki-bazar-app
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
