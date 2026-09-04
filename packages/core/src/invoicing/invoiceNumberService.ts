@@ -4,6 +4,13 @@ import {
   type InvoicePrefix,
 } from "@torki-bazar/shared";
 
+function extractTrailingNumber(value: string | undefined): number {
+  if (!value) return 0;
+
+  const match = value.match(/(\d+)$/);
+  return match ? Number(match[1]) : 0;
+}
+
 export async function nextInvoiceNumber(
   tx: typeof prisma,
   prefix: InvoicePrefix,
@@ -28,19 +35,9 @@ export async function nextInvoiceNumber(
 
   let number = sequence.lastNumber;
 
-  // ------------------------------------------------------------
-  // IMPORTANT:
-  // Keep the invoice sequence ahead of records that already exist.
-  //
-  // This is especially important for SALES because Electron and
-  // Neon can be synchronized/imported independently. In that case
-  // the InvoiceSequence can be behind the highest existing sale
-  // number and the next generated number would violate the unique
-  // constraint on Sale.saleNumber.
-  // ------------------------------------------------------------
-
+  // Sales
   if (prefix === INVOICE_PREFIXES.SALE) {
-    const sales = await tx.sale.findMany({
+    const rows = await tx.sale.findMany({
       where: {
         saleNumber: {
           startsWith: `${prefix}-${year}-`,
@@ -55,50 +52,157 @@ export async function nextInvoiceNumber(
       take: 1,
     });
 
-    const latestSaleNumber = sales[0]?.saleNumber;
-    const match = latestSaleNumber?.match(/(\d+)$/);
-    const existingMax = match ? Number(match[1]) : 0;
+    const existingMax = extractTrailingNumber(rows[0]?.saleNumber);
 
     if (number <= existingMax) {
       number = existingMax + 1;
+    }
+  }
 
-      await tx.invoiceSequence.update({
-        where: {
-          prefix_year: { prefix, year },
+  // Purchases
+  if (prefix === INVOICE_PREFIXES.PURCHASE) {
+    const rows = await tx.purchase.findMany({
+      where: {
+        purchaseNumber: {
+          startsWith: `${prefix}-${year}-`,
         },
-        data: {
-          lastNumber: number,
+      },
+      select: {
+        purchaseNumber: true,
+      },
+      orderBy: {
+        purchaseNumber: "desc",
+      },
+      take: 1,
+    });
+
+    const existingMax = extractTrailingNumber(rows[0]?.purchaseNumber);
+
+    if (number <= existingMax) {
+      number = existingMax + 1;
+    }
+  }
+
+  // Returns
+  if (prefix === INVOICE_PREFIXES.RETURN) {
+    const rows = await tx.return.findMany({
+      where: {
+        returnNumber: {
+          startsWith: `${prefix}-${year}-`,
         },
-      });
+      },
+      select: {
+        returnNumber: true,
+      },
+      orderBy: {
+        returnNumber: "desc",
+      },
+      take: 1,
+    });
+
+    const existingMax = extractTrailingNumber(rows[0]?.returnNumber);
+
+    if (number <= existingMax) {
+      number = existingMax + 1;
+    }
+  }
+
+  // Expenses
+  if (prefix === INVOICE_PREFIXES.EXPENSE) {
+    const rows = await tx.expense.findMany({
+      where: {
+        expenseNumber: {
+          startsWith: `${prefix}-${year}-`,
+        },
+      },
+      select: {
+        expenseNumber: true,
+      },
+      orderBy: {
+        expenseNumber: "desc",
+      },
+      take: 1,
+    });
+
+    const existingMax = extractTrailingNumber(rows[0]?.expenseNumber);
+
+    if (number <= existingMax) {
+      number = existingMax + 1;
+    }
+  }
+
+  // Memberships do not use a year.
+  if (prefix === INVOICE_PREFIXES.MEMBERSHIP && !withYear) {
+    const rows = await tx.membership.findMany({
+      select: {
+        membershipNumber: true,
+      },
+      orderBy: {
+        membershipNumber: "desc",
+      },
+      take: 1,
+    });
+
+    const existingMax = extractTrailingNumber(
+      rows[0]?.membershipNumber
+    );
+
+    if (number <= existingMax) {
+      number = existingMax + 1;
     }
   }
 
   // Supplier payments do not use a year.
-  // Make sure the sequence is never behind an existing payment.
-  if (prefix === "SP" && !withYear) {
-    const payments = await tx.supplierPayment.findMany({
-      select: { paymentNumber: true },
-      orderBy: { paymentNumber: "desc" },
+  if (prefix === INVOICE_PREFIXES.SUPPLIER_PAYMENT && !withYear) {
+    const rows = await tx.supplierPayment.findMany({
+      select: {
+        paymentNumber: true,
+      },
+      orderBy: {
+        paymentNumber: "desc",
+      },
       take: 1,
     });
 
-    const latest = payments[0]?.paymentNumber;
-    const match = latest?.match(/(\d+)$/);
-    const existingMax = match ? Number(match[1]) : 0;
+    const existingMax = extractTrailingNumber(
+      rows[0]?.paymentNumber
+    );
 
     if (number <= existingMax) {
       number = existingMax + 1;
-
-      await tx.invoiceSequence.update({
-        where: {
-          prefix_year: { prefix, year },
-        },
-        data: {
-          lastNumber: number,
-        },
-      });
     }
   }
+
+  // Supplier returns do not use a year.
+  if (prefix === INVOICE_PREFIXES.SUPPLIER_RETURN && !withYear) {
+    const rows = await tx.supplierReturn.findMany({
+      select: {
+        returnNumber: true,
+      },
+      orderBy: {
+        returnNumber: "desc",
+      },
+      take: 1,
+    });
+
+    const existingMax = extractTrailingNumber(
+      rows[0]?.returnNumber
+    );
+
+    if (number <= existingMax) {
+      number = existingMax + 1;
+    }
+  }
+
+  // Keep the sequence synchronized with the actual highest number.
+  await tx.invoiceSequence.update({
+    where: {
+      prefix_year: { prefix, year },
+    },
+    data: {
+      lastNumber: number,
+    },
+  });
 
   const padded = String(number).padStart(6, "0");
 
