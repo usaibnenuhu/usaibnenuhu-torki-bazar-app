@@ -152,9 +152,20 @@ async function bootstrap() {
    *   Neon   -> SQLite
    */
 
-  const isFreshProductionInstall =
+  const databasePathBeforeInitialization = resolveDatabasePath();
+
+  const hadExistingProductionDatabase =
     !isDev &&
-    !fs.existsSync(resolveDatabasePath());
+    fs.existsSync(databasePathBeforeInitialization);
+
+  const neonSnapshotMigrationMarker = path.join(
+    app.getPath("userData"),
+    ".neon-snapshot-v0.1.49"
+  );
+
+  const needsV049NeonSnapshot =
+    !isDev &&
+    !fs.existsSync(neonSnapshotMigrationMarker);
 
   const localDatabasePath = isDev
     ? path.resolve(
@@ -294,16 +305,47 @@ async function bootstrap() {
   await ensureLocalSchema();
 
   /*
-   * FRESH WINDOWS INSTALL:
-   * The newly-created SQLite database contains only the bundled
-   * template data. Neon contains the existing business data.
+   * v0.1.49 COMPLETE NEON DATABASE MIGRATION
    *
-   * Pull the cloud data once before opening the application so
-   * the new installation starts with the existing business data.
+   * This runs exactly once for production installations that have
+   * not yet completed the v0.1.49 Neon snapshot.
+   *
+   * This fixes existing v0.1.48 installations whose local SQLite
+   * database contains incomplete/wrong financial data.
+   *
+   * Before replacing existing local data, create a filesystem
+   * backup so the old database can be recovered if necessary.
+   *
+   * After the snapshot succeeds, write a marker so subsequent
+   * application launches do NOT overwrite local changes.
    */
-  if (isFreshProductionInstall) {
+  if (needsV049NeonSnapshot) {
     console.log(
-      "[main] Fresh production installation detected. Pulling existing Neon data..."
+      "[main] v0.1.49 Neon database migration required."
+    );
+
+    if (hadExistingProductionDatabase) {
+      const backupPath = path.join(
+        app.getPath("userData"),
+        `torki-bazar-pre-v0.1.49-${Date.now()}.db`
+      );
+
+      console.log(
+        `[main] Backing up existing local database to: ${backupPath}`
+      );
+
+      fs.copyFileSync(
+        databasePathBeforeInitialization,
+        backupPath
+      );
+
+      console.log(
+        "[main] Existing local database backup completed."
+      );
+    }
+
+    console.log(
+      "[main] Replacing local business data with complete Neon snapshot..."
     );
 
     const { pullFreshNeonSnapshot } =
@@ -311,8 +353,22 @@ async function bootstrap() {
 
     const result = await pullFreshNeonSnapshot();
 
+    fs.writeFileSync(
+      neonSnapshotMigrationMarker,
+      JSON.stringify(
+        {
+          version: app.getVersion(),
+          completedAt: new Date().toISOString(),
+          recordsCopied: result.pulled,
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+
     console.log(
-      `[main] Initial Neon snapshot complete. Records copied: ${result.pulled}`
+      `[main] v0.1.49 Neon migration complete. Records copied: ${result.pulled}`
     );
   }
 

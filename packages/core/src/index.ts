@@ -23,5 +23,6 @@ export * from "./reset/resetService";
 export * from "./cash/cashService";
 export * from "./bKash/bkashService";
 export * from "./sync/syncService";
+export * from "./sync/freshInstallSync";
 
 export * from "./bank/bankService";
