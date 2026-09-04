@@ -4,6 +4,7 @@ import { AppError } from "@torki-bazar/shared";
 import * as core from "@torki-bazar/core";
 import { getSession, requireSession, setSession } from "./session";
 import { serialize } from "./serialize";
+import { printPosReceipt } from "./receiptPrinter";
 import {
   checkForDesktopUpdate,
   downloadDesktopUpdate,
@@ -45,6 +46,11 @@ function handle(channel: string, fn: Handler) {
 }
 
 export function registerIpcHandlers() {
+  handle(
+    "receipt:print",
+    async (input) => printPosReceipt(input)
+  );
+
   // ============================================================
   // APPLICATION UPDATES
   // ============================================================

@@ -7,6 +7,7 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
+        external: ["@torki-bazar/database", "@torki-bazar/shared", "@torki-bazar/core"],
         input: { index: resolve(__dirname, "src/main/index.ts") },
       },
     },

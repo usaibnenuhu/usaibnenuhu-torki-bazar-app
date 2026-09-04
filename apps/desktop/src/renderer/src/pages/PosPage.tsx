@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import torkiLogo from "../assets/torki-logo.png";
 import { call } from "../api/client";
 import { Button } from "../components/Button";
 import { Field, Input, Select } from "../components/Form";
@@ -528,6 +529,88 @@ function SummaryRow({
 ============================================================ */
 
 export function PosPage() {
+  // ============================================================
+  // POS THERMAL RECEIPT
+  // ============================================================
+
+  const [latestSaleNumber, setLatestSaleNumber] = useState("");
+  const [receiptSearch, setReceiptSearch] = useState("");
+  const [receiptPrinting, setReceiptPrinting] = useState(false);
+
+  async function logoToDataUrl(): Promise<string> {
+    const response = await fetch(torkiLogo);
+    const blob = await response.blob();
+
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+
+      reader.onloadend = () => {
+        if (typeof reader.result === "string") {
+          resolve(reader.result);
+        } else {
+          reject(new Error("Unable to load receipt logo."));
+        }
+      };
+
+      reader.onerror = () => {
+        reject(new Error("Unable to load receipt logo."));
+      };
+
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function printSaleReceipt(saleNumber: string) {
+    const lookup = saleNumber.trim();
+
+    if (!lookup) {
+      push("Enter a sale number to print.", "error");
+      return;
+    }
+
+    setReceiptPrinting(true);
+
+    try {
+      const sale = await call<any>("sales:get", {
+        id: lookup,
+      });
+
+      const logoDataUrl = await logoToDataUrl();
+
+      await call("receipt:print", {
+        saleNumber: sale.saleNumber,
+        saleDate: sale.saleDate,
+        customer: sale.customer,
+        customerName: sale.customerName,
+        customerPhone: sale.customerPhone,
+        subtotal: sale.subtotal,
+        discount: sale.discount,
+        totalAmount: sale.totalAmount,
+        paymentMethod: sale.paymentMethod,
+        paymentStatus: sale.paymentStatus,
+        onlineOrderNumber: sale.onlineOrderNumber,
+        createdBy: sale.createdBy,
+        items: sale.items,
+        logoDataUrl,
+      });
+
+      setLatestSaleNumber(sale.saleNumber);
+      setReceiptSearch(sale.saleNumber);
+
+      push("Receipt sent to the POS printer.", "success");
+    } catch (err) {
+      push(
+        err instanceof Error
+          ? err.message
+          : "Unable to print receipt.",
+        "error"
+      );
+    } finally {
+      setReceiptPrinting(false);
+    }
+  }
+
+
   const [code, setCode] = useState("");
   const [cart, setCart] = useState<CartLine[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -782,7 +865,7 @@ export function PosPage() {
     setProcessing(true);
 
     try {
-      await call("sales:create", {
+      const createdSale = await call<any>("sales:create", {
         customerId:
           customerId || undefined,
 
@@ -828,6 +911,50 @@ export function PosPage() {
 
       // 🔊 Successful completed sale
       playSuccessSound();
+
+      // Automatically print the completed sale as an 80mm POS receipt.
+      try {
+        const saleNumber = createdSale?.saleNumber;
+
+        if (saleNumber) {
+          setLatestSaleNumber(saleNumber);
+          setReceiptSearch(saleNumber);
+
+          // Reload the completed sale so the receipt always has
+          // the full customer, product/item, and sale details.
+          const receiptSale = await call<any>("sales:get", {
+            id: saleNumber,
+          });
+
+          const logoDataUrl = await logoToDataUrl();
+
+          await call("receipt:print", {
+            saleNumber: receiptSale.saleNumber,
+            saleDate: receiptSale.saleDate,
+            customer: receiptSale.customer,
+            customerName: receiptSale.customerName,
+            customerPhone: receiptSale.customerPhone,
+            subtotal: receiptSale.subtotal,
+            discount: receiptSale.discount,
+            totalAmount: receiptSale.totalAmount,
+            paymentMethod: receiptSale.paymentMethod,
+            paymentStatus: receiptSale.paymentStatus,
+            onlineOrderNumber: receiptSale.onlineOrderNumber,
+            createdBy: receiptSale.createdBy,
+            items: receiptSale.items,
+            logoDataUrl,
+          });
+        }
+      } catch (printError) {
+        console.error("[POS RECEIPT]", printError);
+
+        push(
+          printError instanceof Error
+            ? `Sale completed, but receipt printing failed: ${printError.message}`
+            : "Sale completed, but receipt printing failed.",
+          "error"
+        );
+      }
 
       setCart([]);
 
@@ -1842,6 +1969,114 @@ export function PosPage() {
             </section>
           </aside>
         </div>
+
+        {/* ========================================================
+            POS RECEIPT / REPRINT
+        ======================================================== */}
+        <section className="mt-4 rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700">
+                  <span className="text-base leading-none">🖨</span>
+                </div>
+
+                <div>
+                  <h3 className="text-sm font-black text-slate-800">
+                    POS Receipt
+                  </h3>
+
+                  <p className="text-[10px] text-slate-400">
+                    Print or reprint a completed sale on the thermal POS printer
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="relative">
+                <input
+                  value={receiptSearch}
+                  onChange={(e) =>
+                    setReceiptSearch(e.target.value)
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      void printSaleReceipt(receiptSearch);
+                    }
+                  }}
+                  placeholder="Sale number"
+                  aria-label="Sale number"
+                  className="
+                    h-10 w-full rounded-xl border border-slate-200
+                    bg-slate-50 px-3 text-sm font-semibold text-slate-800
+                    outline-none transition
+                    placeholder:text-slate-400
+                    focus:border-emerald-500 focus:bg-white
+                    focus:ring-2 focus:ring-emerald-100
+                    sm:w-52
+                  "
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  void printSaleReceipt(
+                    receiptSearch || latestSaleNumber
+                  );
+                }}
+                disabled={
+                  receiptPrinting ||
+                  !(receiptSearch || latestSaleNumber)
+                }
+                className="
+                  inline-flex h-10 items-center justify-center gap-2
+                  rounded-xl bg-emerald-700 px-4
+                  text-xs font-black text-white
+                  shadow-sm transition
+                  hover:bg-emerald-800
+                  disabled:cursor-not-allowed
+                  disabled:opacity-50
+                "
+              >
+                {receiptPrinting ? (
+                  <>
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                    Printing...
+                  </>
+                ) : (
+                  <>
+                    <span className="text-sm leading-none">🖨</span>
+                    Print Receipt
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {latestSaleNumber && (
+            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+              <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-slate-400">
+                Latest completed sale
+              </span>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setReceiptSearch(latestSaleNumber);
+                }}
+                className="
+                  rounded-lg bg-slate-100 px-2.5 py-1
+                  font-mono text-[11px] font-bold text-slate-700
+                  transition hover:bg-emerald-50 hover:text-emerald-700
+                "
+              >
+                {latestSaleNumber}
+              </button>
+            </div>
+          )}
+        </section>
 
         {/* FOOTER STATUS */}
         <div className="mt-3 hidden items-center justify-between px-1 text-[9px] text-slate-400 lg:flex">

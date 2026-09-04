@@ -1,6 +1,7 @@
 appId: com.torkibazar.desktop
-productName: Torki Bazar
-executableName: Torki Bazar
+productName: Torki Bazar RMS
+executableName: Torki-Bazar-RMS
+icon: apps/desktop/build/icon.ico
 
 directories:
   app: .
@@ -12,8 +13,12 @@ files:
   - packages/database/prisma/schema.prisma
   - packages/database/prisma/schema.neon.prisma
   - packages/database/prisma/schema.postgres.prisma
-  - node_modules/.prisma/client/**/*
+  - from: node_modules/.prisma/client
+    to: node_modules/.prisma/client
+    filter:
+      - '**/*'
   - node_modules/@prisma/client/**/*
+  - packages/database/prisma/generated/sqlite/**/*
 
 extraResources:
   - from: apps/desktop/build/database/torki-bazar-template.db
@@ -30,7 +35,7 @@ win:
     - target: nsis
       arch:
         - x64
-  artifactName: Torki-Bazar-Setup-${version}.${ext}
+  artifactName: Torki-Bazar-RMS-Setup-${version}.${ext}
 
 nsis:
   oneClick: false
@@ -39,8 +44,8 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: always
   createStartMenuShortcut: true
-  shortcutName: Torki Bazar
-  menuCategory: Torki Bazar
+  shortcutName: Torki Bazar RMS
+  menuCategory: Torki Bazar RMS
   runAfterFinish: true
   deleteAppDataOnUninstall: false
 
