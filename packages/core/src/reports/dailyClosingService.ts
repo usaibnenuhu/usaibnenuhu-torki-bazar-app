@@ -1,5 +1,5 @@
 import { prisma, Prisma } from "@torki-bazar/database";
-import { PERMISSIONS, DuplicateError } from "@torki-bazar/shared";
+import { PERMISSIONS } from "@torki-bazar/shared";
 import type { AuthSession } from "../context";
 import { assertPermission } from "../context";
 import { recordAuditLog } from "../audit/auditService";
@@ -16,14 +16,11 @@ function endOfDay(date: Date) {
 }
 
 // Generates and persists the daily business closing report.
-// Historical closings are immutable once created.
+// Re-closing the same date recalculates and updates the existing closing.
 export async function generateDailyClosing(session: AuthSession, closingDate: Date) {
   assertPermission(session, PERMISSIONS.REPORTS_VIEW);
   const from = startOfDay(closingDate);
   const to = endOfDay(closingDate);
-
-  const existing = await prisma.dailyClosing.findUnique({ where: { closingDate: from } });
-  if (existing) throw new DuplicateError(`A daily closing for ${from.toDateString()} already exists.`);
 
   const sales = await prisma.sale.findMany({
     where: { saleDate: { gte: from, lte: to }, status: "COMPLETED" },
@@ -108,9 +105,24 @@ export async function generateDailyClosing(session: AuthSession, closingDate: Da
 
   const netOperatingResult = grossProfit.sub(expensesTotal);
 
-  const closing = await prisma.dailyClosing.create({
-    data: {
+  const closing = await prisma.dailyClosing.upsert({
+    where: { closingDate: from },
+    create: {
       closingDate: from,
+      totalSales,
+      cashSales,
+      bkashSales,
+      codCollected,
+      returns: totalReturnsRefund,
+      expenses: expensesTotal,
+      supplierPayments: supplierPayments._sum.amount ?? 0,
+      customerPayments: customerPayments._sum.amount ?? 0,
+      cogs,
+      grossProfit,
+      netOperatingResult,
+      closedById: session.userId,
+    },
+    update: {
       totalSales,
       cashSales,
       bkashSales,
@@ -126,7 +138,11 @@ export async function generateDailyClosing(session: AuthSession, closingDate: Da
     },
   });
 
-  await recordAuditLog(session, { action: "CREATE", module: "DAILY_CLOSING", recordId: closing.id });
+  await recordAuditLog(session, {
+    action: "UPDATE",
+    module: "DAILY_CLOSING",
+    recordId: closing.id,
+  });
   return closing;
 }
 

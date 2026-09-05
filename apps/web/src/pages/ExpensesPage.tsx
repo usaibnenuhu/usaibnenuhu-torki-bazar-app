@@ -31,6 +31,29 @@ interface Expense {
   } | null;
 }
 
+interface InventoryLoss {
+  id: string;
+  date: string;
+  reason: string;
+  productName: string;
+  sku: string;
+  unit: string;
+  batchCode?: string | null;
+  supplierName?: string | null;
+  purchaseNumber?: string | null;
+  quantity: string;
+  unitCost: string;
+  lossValue: string;
+  notes?: string | null;
+  recordedBy?: string | null;
+}
+
+interface InventoryLossResponse {
+  items: InventoryLoss[];
+  totalValue: string;
+  totalQuantity: string;
+}
+
 const DASH = "—";
 
 function SearchIcon() {
@@ -84,6 +107,11 @@ function PlusIcon() {
 export function ExpensesPage() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [categories, setCategories] = useState<ExpenseCategory[]>([]);
+  const [inventoryLosses, setInventoryLosses] = useState<InventoryLoss[]>([]);
+  const [inventoryLossTotalValue, setInventoryLossTotalValue] = useState("0");
+  const [inventoryLossTotalQuantity, setInventoryLossTotalQuantity] = useState("0");
+  const [activeSection, setActiveSection] =
+    useState<"EXPENSES" | "INVENTORY_LOSS">("EXPENSES");
   const [lookupNumber, setLookupNumber] = useState("");
   const [found, setFound] = useState<Expense | null>(null);
 
@@ -98,12 +126,16 @@ export function ExpensesPage() {
 
   async function load() {
     try {
-      const [expData, catData] = await Promise.all([
+      const [expData, catData, lossData] = await Promise.all([
         call<Expense[]>("expenses:list"),
         call<ExpenseCategory[]>("expenses:categories:list"),
+        call<InventoryLossResponse>("inventory:losses"),
       ]);
       setExpenses(expData);
       setCategories(catData);
+      setInventoryLosses(lossData.items);
+      setInventoryLossTotalValue(String(lossData.totalValue ?? "0"));
+      setInventoryLossTotalQuantity(String(lossData.totalQuantity ?? "0"));
       if (catData.length > 0 && !categoryId) {
         setCategoryId(catData[0].id);
       }
@@ -132,7 +164,14 @@ export function ExpensesPage() {
         reference: reference.trim() || undefined,
       });
 
-      push("Expense recorded successfully — cash deducted from management.", "success");
+      push(
+        paymentMethod === "BANK"
+          ? "Expense recorded successfully — bank balance deducted from Bank Management."
+          : paymentMethod === "BKASH"
+            ? "Expense recorded successfully — bKash balance deducted."
+            : "Expense recorded successfully — cash deducted from management.",
+        "success"
+      );
       setShowAddModal(false);
       setAmount("");
       setDescription("");
@@ -185,7 +224,40 @@ export function ExpensesPage() {
         </Button>
       </div>
 
-      {/* SEARCH LOOKUP */}
+      {/* EXPENSES / INVENTORY LOSS TABS */}
+      <div className="print:hidden reveal" style={{ animationDelay: "40ms" }}>
+        <Card className="!p-1.5">
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              onClick={() => setActiveSection("EXPENSES")}
+              className={`rounded-2xl px-4 py-3 text-sm font-black transition-all ${
+                activeSection === "EXPENSES"
+                  ? "bg-emerald-700 text-white shadow-md"
+                  : "text-slate-600 hover:bg-slate-50"
+              }`}
+            >
+              Expenses History
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveSection("INVENTORY_LOSS")}
+              className={`rounded-2xl px-4 py-3 text-sm font-black transition-all ${
+                activeSection === "INVENTORY_LOSS"
+                  ? "bg-emerald-700 text-white shadow-md"
+                  : "text-slate-600 hover:bg-slate-50"
+              }`}
+            >
+              Inventory Loss
+            </button>
+          </div>
+        </Card>
+      </div>
+
+      {activeSection === "EXPENSES" && (
+        <>
+          {/* SEARCH LOOKUP */}
       <div className="print:hidden reveal" style={{ animationDelay: "60ms" }}>
         <Card className="search-card relative overflow-hidden !border-emerald-100/70 !bg-white/90 !p-5 shadow-[0_10px_30px_-12px_rgba(6,78,59,0.18)] backdrop-blur-xl">
           <form onSubmit={handleLookup} className="relative flex flex-col gap-2.5 sm:flex-row">
@@ -390,12 +462,136 @@ export function ExpensesPage() {
         </Card>
       </div>
 
+        </>
+      )}
+
+      {/* INVENTORY LOSS HISTORY */}
+      {activeSection === "INVENTORY_LOSS" && (
+        <div
+          className="print:hidden reveal space-y-4"
+          style={{ animationDelay: "100ms" }}
+        >
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <Card>
+              <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                Total Quantity Lost
+              </div>
+              <div className="mt-2 text-2xl font-black text-slate-900">
+                {inventoryLossTotalQuantity}
+              </div>
+              <div className="mt-1 text-xs text-slate-500">
+                Damaged and expired stock
+              </div>
+            </Card>
+
+            <Card>
+              <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                Total Loss Value
+              </div>
+              <div className="mt-2 text-2xl font-black text-slate-900">
+                {formatBDT(inventoryLossTotalValue)}
+              </div>
+              <div className="mt-1 text-xs text-slate-500">
+                Based on batch purchase cost
+              </div>
+            </Card>
+          </div>
+
+          <Card>
+            <div className="mb-4">
+              <h2 className="text-lg font-black text-slate-900">
+                Inventory Loss History
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Stock written off as damaged or expired. This is a read-only
+                history; no second expense is created here.
+              </p>
+            </div>
+
+            <DataTable
+              columns={[
+                {
+                  key: "date",
+                  header: "Date",
+                  accessor: (item: InventoryLoss) =>
+                    formatDateTime(item.date),
+                },
+                {
+                  key: "product",
+                  header: "Product",
+                  accessor: (item: InventoryLoss) => (
+                    <div>
+                      <div className="font-semibold text-slate-900">
+                        {item.productName}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        SKU: {item.sku || DASH}
+                      </div>
+                    </div>
+                  ),
+                },
+                {
+                  key: "batch",
+                  header: "Batch",
+                  accessor: (item: InventoryLoss) =>
+                    item.batchCode || DASH,
+                },
+                {
+                  key: "reason",
+                  header: "Reason",
+                  accessor: (item: InventoryLoss) => (
+                    <span className="font-bold">
+                      {item.reason}
+                    </span>
+                  ),
+                },
+                {
+                  key: "quantity",
+                  header: "Quantity",
+                  accessor: (item: InventoryLoss) =>
+                    `${item.quantity}${item.unit ? ` ${item.unit}` : ""}`,
+                },
+                {
+                  key: "unitCost",
+                  header: "Unit Cost",
+                  accessor: (item: InventoryLoss) =>
+                    formatBDT(item.unitCost),
+                },
+                {
+                  key: "lossValue",
+                  header: "Loss Value",
+                  accessor: (item: InventoryLoss) => (
+                    <span className="font-bold">
+                      {formatBDT(item.lossValue)}
+                    </span>
+                  ),
+                },
+              ]}
+              rows={inventoryLosses}
+              keyFor={(item) => item.id}
+              emptyMessage="No inventory losses recorded."
+            />
+          </Card>
+
+          <Card>
+            <div className="text-sm text-slate-600">
+              <span className="font-bold text-slate-900">
+                Accounting note:
+              </span>{" "}
+              Each inventory write-off creates one Inventory Loss expense
+              record for reporting, but it does not deduct Cash, Bank, or
+              bKash. Do not record the same loss again as a normal expense.
+            </div>
+          </Card>
+        </div>
+      )}
+
       {/* RECORD EXPENSE MODAL */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
           <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl animate-[fadeIn_.25s_cubic-bezier(0.16,1,0.3,1)]">
             <h2 className="text-lg font-black text-slate-900">Record Operating Expense</h2>
-            <p className="mt-1 text-xs text-slate-500">This will automatically deduct from your Cash Management ledger.</p>
+            <p className="mt-1 text-xs text-slate-500">The selected payment method will be used to record this financial outflow.</p>
 
             <form onSubmit={handleCreateExpense} className="mt-4 space-y-4">
               <div>
@@ -445,7 +641,7 @@ export function ExpensesPage() {
                     onChange={(e) => setPaymentMethod(e.target.value)}
                   >
                     <option value="CASH">Cash</option>
-                    <option value="BANK">Bank</option>
+                    <option value="BANK">Bank Transfer</option>
                     <option value="BKASH">bKash</option>
                     <option value="NAGAD">Nagad</option>
                   </select>
@@ -468,7 +664,7 @@ export function ExpensesPage() {
                   Cancel
                 </Button>
                 <Button type="submit" className="!rounded-xl">
-                  Save & Deduct Cash
+                  Save & Record Expense
                 </Button>
               </div>
             </form>

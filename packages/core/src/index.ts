@@ -26,3 +26,5 @@ export * from "./sync/syncService";
 export * from "./sync/freshInstallSync";
 
 export * from "./bank/bankService";
+
+export * from "./reports/reportService";

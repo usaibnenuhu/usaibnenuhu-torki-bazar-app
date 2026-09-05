@@ -729,6 +729,24 @@ async function startServer() {
     if (channel === "reports:dailyClosing:list")
       return core.listDailyClosings();
 
+    if (channel === "reports:daily")
+      return core.getDailyReport(
+        session,
+        new Date(payload.date)
+      );
+
+    if (channel === "reports:monthly")
+      return core.getMonthlyReport(
+        session,
+        new Date(payload.date)
+      );
+
+    if (channel === "reports:yearly")
+      return core.getYearlyReport(
+        session,
+        new Date(payload.date)
+      );
+
     // ==========================================================
     // NOTIFICATIONS
     // ==========================================================

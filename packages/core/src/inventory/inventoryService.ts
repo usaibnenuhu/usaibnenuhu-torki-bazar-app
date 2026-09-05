@@ -9,6 +9,8 @@ import type { AuthSession } from "../context";
 import { assertPermission } from "../context";
 import { recordAuditLog } from "../audit/auditService";
 import { enqueueSync } from "../sync/syncService";
+import { nextInvoiceNumber } from "../invoicing/invoiceNumberService";
+import { INVOICE_PREFIXES } from "@torki-bazar/shared";
 
 type Tx = Prisma.TransactionClient;
 
@@ -872,6 +874,83 @@ export async function writeOffBatch(
           params.notes?.trim() ||
           `Batch ${batch.batchCode} written off as ${params.reason.toLowerCase()}.`,
       });
+
+      // Inventory loss must also appear in the Expenses ledger,
+      // but it is NOT a cash/bank/bKash payment.
+      //
+      // Do NOT call createExpense() here because createExpense()
+      // intentionally creates a money outflow. A stock write-off
+      // reduces the inventory asset only.
+      const inventoryLossCategory =
+        await tx.expenseCategory.upsert({
+          where: {
+            name: "Inventory Loss",
+          },
+          update: {},
+          create: {
+            name: "Inventory Loss",
+          },
+        });
+
+      const expenseNumber = await nextInvoiceNumber(
+        tx as unknown as typeof prisma,
+        INVOICE_PREFIXES.EXPENSE
+      );
+
+      const unitCost = new Prisma.Decimal(
+        batch.purchasePrice ?? 0
+      );
+
+      const lossValue = quantity.mul(unitCost);
+
+      const expense = await tx.expense.create({
+        data: {
+          expenseNumber,
+          categoryId: inventoryLossCategory.id,
+          description:
+            `Inventory loss — ${batch.batchCode}`,
+          amount: lossValue,
+          paymentMethod: "INVENTORY_LOSS",
+          reference: batch.id,
+          notes:
+            params.notes?.trim() ||
+            `${params.reason === "EXPIRED" ? "Expired" : "Damaged"} stock written off from batch ${batch.batchCode}. Quantity: ${quantity.toString()}. Unit cost: ${unitCost.toString()}.`,
+          expenseDate: new Date(),
+          createdById: session.userId,
+        },
+      });
+
+      await recordAuditLog(
+        session,
+        {
+          action: "CREATE",
+          module: "EXPENSE",
+          recordId: expense.id,
+          newValue: expense,
+        },
+        tx
+      );
+
+      await enqueueSync(
+        "EXPENSE",
+        expense.id,
+        "CREATE",
+        {
+          id: expense.id,
+          expenseNumber: expense.expenseNumber,
+          categoryId: expense.categoryId,
+          description: expense.description,
+          amount: expense.amount,
+          expenseDate: expense.expenseDate,
+          paymentMethod: expense.paymentMethod,
+          reference: expense.reference,
+          notes: expense.notes,
+          status: expense.status,
+          createdById: expense.createdById,
+          createdAt: expense.createdAt,
+        },
+        tx
+      );
 
       return tx.productBatch.findUniqueOrThrow({
         where: {

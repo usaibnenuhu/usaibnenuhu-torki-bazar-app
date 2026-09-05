@@ -4,12 +4,80 @@ import type { AuthSession } from "../context";
 import { assertPermission } from "../context";
 import { recordAuditLog } from "../audit/auditService";
 import { nextInvoiceNumber } from "../invoicing/invoiceNumberService";
+import { enqueueSync } from "../sync/syncService";
+
+/**
+ * Mirror Windows RMS employee data to Neon for the online portal.
+ *
+ * Local SQLite remains the Windows RMS source of truth. Neon failures
+ * are deliberately non-blocking so an employee can still be saved locally.
+ */
+async function syncEmployeeToNeon(
+  employee: NonNullable<
+    Awaited<ReturnType<typeof prisma.employee.findUnique>>
+  >
+) {
+  try {
+    if (!process.env.NEON_DATABASE_URL) {
+      return;
+    }
+
+    const { neonPrisma } = await import("@torki-bazar/database");
+
+    await neonPrisma.employee.upsert({
+      where: { id: employee.id },
+      create: {
+        id: employee.id,
+        name: employee.name,
+        phone: employee.phone,
+        address: employee.address,
+        position: employee.position,
+        joiningDate: employee.joiningDate,
+        baseSalary: employee.baseSalary,
+        notes: employee.notes,
+        status: employee.status,
+        createdAt: employee.createdAt,
+        updatedAt: employee.updatedAt,
+      },
+      update: {
+        name: employee.name,
+        phone: employee.phone,
+        address: employee.address,
+        position: employee.position,
+        joiningDate: employee.joiningDate,
+        baseSalary: employee.baseSalary,
+        notes: employee.notes,
+        status: employee.status,
+        updatedAt: employee.updatedAt,
+      },
+    });
+  } catch (error) {
+    console.error(
+      `[employee-sync] Failed to mirror employee ${employee.id} to Neon:`,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
+async function syncAllEmployeesToNeon(
+  employees: Awaited<ReturnType<typeof prisma.employee.findMany>>
+) {
+  for (const employee of employees) {
+    await syncEmployeeToNeon(employee);
+  }
+}
 
 export async function listEmployees(includeInactive = false) {
-  return prisma.employee.findMany({
+  const employees = await prisma.employee.findMany({
     where: includeInactive ? {} : { status: "ACTIVE" },
     orderBy: { name: "asc" },
   });
+
+  // Opening the Windows Employee page also repairs historical
+  // employees that existed before Employee synchronization.
+  await syncAllEmployeesToNeon(employees);
+
+  return employees;
 }
 
 export async function createEmployee(
@@ -19,6 +87,7 @@ export async function createEmployee(
   assertPermission(session, PERMISSIONS.EMPLOYEES_MANAGE);
   const employee = await prisma.employee.create({ data: input });
   await recordAuditLog(session, { action: "CREATE", module: "EMPLOYEE", recordId: employee.id, newValue: employee });
+  await syncEmployeeToNeon(employee);
   return employee;
 }
 
@@ -32,6 +101,7 @@ export async function updateEmployee(
   if (!before) throw new NotFoundError("Employee not found.");
   const employee = await prisma.employee.update({ where: { id }, data: input });
   await recordAuditLog(session, { action: "UPDATE", module: "EMPLOYEE", recordId: id, previousValue: before, newValue: employee });
+  await syncEmployeeToNeon(employee);
   return employee;
 }
 
@@ -39,6 +109,7 @@ export async function setEmployeeStatus(session: AuthSession, id: string, status
   assertPermission(session, PERMISSIONS.EMPLOYEES_MANAGE);
   const employee = await prisma.employee.update({ where: { id }, data: { status } });
   await recordAuditLog(session, { action: "UPDATE_STATUS", module: "EMPLOYEE", recordId: id, newValue: { status } });
+  await syncEmployeeToNeon(employee);
   return employee;
 }
 
@@ -70,20 +141,46 @@ export async function paySalary(
 
   if (numericNetSalary <= 0) throw new ValidationError("Net salary must be greater than zero.");
 
-  // Check current cash balance before allowing payment
-  const cashTransactions = await prisma.cashTransaction.findMany({
-    select: { type: true, amount: true },
-  });
+  // Check the selected payment source before allowing salary payment.
+  if (input.paymentMethod.toUpperCase() === "CASH") {
+    const cashTransactions = await prisma.cashTransaction.findMany({
+      select: { type: true, amount: true },
+    });
 
-  const currentCashBalance = cashTransactions.reduce((acc, tx) => {
-    const val = Number(tx.amount);
-    if (tx.type === "MANUAL_IN") return acc + val;
-    if (tx.type === "MANUAL_OUT") return acc - val;
-    return acc;
-  }, 0);
+    const currentCashBalance = cashTransactions.reduce((acc, tx) => {
+      const val = Number(tx.amount);
+      if (tx.type === "MANUAL_IN") return acc + val;
+      if (tx.type === "MANUAL_OUT") return acc - val;
+      return acc;
+    }, 0);
 
-  if (numericNetSalary > currentCashBalance) {
-    throw new ValidationError(`Insufficient available cash. Current cash balance is ৳${currentCashBalance.toFixed(2)}, but net salary requires ৳${numericNetSalary.toFixed(2)}.`);
+    if (numericNetSalary > currentCashBalance) {
+      throw new ValidationError(`Insufficient available cash. Current cash balance is ৳${currentCashBalance.toFixed(2)}, but net salary requires ৳${numericNetSalary.toFixed(2)}.`);
+    }
+  }
+
+  // Bank Transfer uses the existing Bank Management BANK ledger.
+  if (input.paymentMethod.toUpperCase() === "BANK") {
+    const bankTransactions = await prisma.bankTransaction.findMany({
+      select: { type: true, amount: true },
+    });
+
+    const currentBankBalance = bankTransactions.reduce((balance, tx) => {
+      const amount = Number(tx.amount);
+
+      if (
+        tx.type === "BANK_IN" ||
+        tx.type === "DEPOSIT"
+      ) {
+        return balance + amount;
+      }
+
+      return balance - amount;
+    }, 0);
+
+    if (numericNetSalary > currentBankBalance) {
+      throw new ValidationError(`Insufficient available bank balance. Current bank balance is ৳${currentBankBalance.toFixed(2)}, but net salary requires ৳${numericNetSalary.toFixed(2)}.`);
+    }
   }
 
   return prisma.$transaction(async (tx) => {
@@ -126,19 +223,84 @@ export async function paySalary(
       },
     });
 
-    // 2. Automatically record cash outflow so it subtracts from Cash Management
-    const cashOutflow = await tx.cashTransaction.create({
-      data: {
-        type: "MANUAL_OUT",
-        amount: numericNetSalary,
-        transactionDate: new Date(),
-        note: `Expense - ${expenseNumber}: ${description}`,
-        createdById: session.userId,
-      },
-    });
+    // 2. Record the payment against the selected money-management ledger.
+    if (input.paymentMethod.toUpperCase() === "CASH") {
+      const cashOutflow = await tx.cashTransaction.create({
+        data: {
+          type: "MANUAL_OUT",
+          amount: numericNetSalary,
+          transactionDate: new Date(),
+          note: `Expense - ${expenseNumber}: ${description}`,
+          createdById: session.userId,
+        },
+      });
 
-    await recordAuditLog(session, { action: "CREATE", module: "SALARY", recordId: salary.id, newValue: salary }, tx);
-    await recordAuditLog(session, { action: "CREATE", module: "CASH_TRANSACTION", recordId: cashOutflow.id, newValue: cashOutflow }, tx);
+      await recordAuditLog(
+        session,
+        {
+          action: "CREATE",
+          module: "CASH_TRANSACTION",
+          recordId: cashOutflow.id,
+          newValue: cashOutflow,
+        },
+        tx
+      );
+    }
+
+    // Bank Transfer records a BANK_OUT transaction in Bank Management.
+    if (input.paymentMethod.toUpperCase() === "BANK") {
+      const bankOutflow = await tx.bankTransaction.create({
+        data: {
+          type: "BANK_OUT",
+          amount: numericNetSalary,
+          transactionDate: new Date(),
+          note: `Expense - ${expenseNumber}: ${description}`,
+          reference: input.reference,
+          createdById: session.userId,
+        },
+      });
+
+      await enqueueSync(
+        "BANK_TRANSACTION",
+        bankOutflow.id,
+        "CREATE",
+        {
+          id: bankOutflow.id,
+          type: bankOutflow.type,
+          amount: bankOutflow.amount,
+          transactionDate: bankOutflow.transactionDate,
+          note: bankOutflow.note,
+          reference: bankOutflow.reference,
+          transferId: bankOutflow.transferId,
+          createdById: bankOutflow.createdById,
+          createdAt: bankOutflow.createdAt,
+          updatedAt: bankOutflow.updatedAt,
+        },
+        tx
+      );
+
+      await recordAuditLog(
+        session,
+        {
+          action: "CREATE",
+          module: "BANK_TRANSACTION",
+          recordId: bankOutflow.id,
+          newValue: bankOutflow,
+        },
+        tx
+      );
+    }
+
+    await recordAuditLog(
+      session,
+      {
+        action: "CREATE",
+        module: "SALARY",
+        recordId: salary.id,
+        newValue: salary,
+      },
+      tx
+    );
 
     return salary;
   });

@@ -6,6 +6,7 @@ import { recordAuditLog } from "../audit/auditService";
 import { nextInvoiceNumber } from "../invoicing/invoiceNumberService";
 import { recordExpenseCashOutflow } from "../cash/cashService";
 import { recordBkashExpenseOutflow } from "../bKash/bkashService";
+import { enqueueSync } from "../sync/syncService";
 
 export async function listExpenseCategories(includeArchived = false) {
   return prisma.expenseCategory.findMany({ where: includeArchived ? {} : { isArchived: false }, orderBy: { name: "asc" } });
@@ -30,10 +31,52 @@ export interface CreateExpenseInput {
 
 export async function createExpense(session: AuthSession, input: CreateExpenseInput) {
   assertPermission(session, PERMISSIONS.EXPENSES_MANAGE);
-  if (input.amount <= 0) throw new ValidationError("Expense amount must be greater than zero.");
+  if (input.amount <= 0) {
+    throw new ValidationError("Expense amount must be greater than zero.");
+  }
+
+  const paymentMethod = input.paymentMethod.toUpperCase();
+
+  // Bank Transfer uses the existing Bank Management BANK ledger.
+  // Check the available bank balance before recording the expense.
+  if (paymentMethod === "BANK") {
+    const bankTransactions = await prisma.bankTransaction.findMany({
+      select: {
+        type: true,
+        amount: true,
+      },
+    });
+
+    const currentBankBalance = bankTransactions.reduce((balance, transaction) => {
+      const amount = Number(transaction.amount);
+
+      if (
+        transaction.type === "BANK_IN" ||
+        transaction.type === "DEPOSIT"
+      ) {
+        return balance + amount;
+      }
+
+      return balance - amount;
+    }, 0);
+
+    if (input.amount > currentBankBalance) {
+      throw new ValidationError(
+        `Insufficient bank balance. Available bank balance is ৳${currentBankBalance.toFixed(
+          2
+        )}, but you are trying to pay ৳${input.amount.toFixed(
+          2
+        )}. Please add funds to Bank Management first.`
+      );
+    }
+  }
 
   return prisma.$transaction(async (tx) => {
-    const expenseNumber = await nextInvoiceNumber(tx as unknown as typeof prisma, INVOICE_PREFIXES.EXPENSE);
+    const expenseNumber = await nextInvoiceNumber(
+      tx as unknown as typeof prisma,
+      INVOICE_PREFIXES.EXPENSE
+    );
+
     const expense = await tx.expense.create({
       data: {
         expenseNumber,
@@ -48,8 +91,8 @@ export async function createExpense(session: AuthSession, input: CreateExpenseIn
       },
     });
 
-    // Automatically route outflow based on payment method
-    if (input.paymentMethod.toUpperCase() === "BKASH") {
+    // Automatically route outflow based on payment method.
+    if (paymentMethod === "BKASH") {
       await recordBkashExpenseOutflow(
         tx,
         session,
@@ -58,7 +101,50 @@ export async function createExpense(session: AuthSession, input: CreateExpenseIn
         input.description,
         input.expenseDate ?? new Date()
       );
+    } else if (paymentMethod === "BANK") {
+      // Bank Transfer reduces the existing Bank Management BANK balance.
+      const bankOutflow = await tx.bankTransaction.create({
+        data: {
+          type: "BANK_OUT",
+          amount: input.amount,
+          transactionDate: input.expenseDate ?? new Date(),
+          note: `Expense - ${expenseNumber}: ${input.description}`,
+          reference: input.reference,
+          createdById: session.userId,
+        },
+      });
+
+      await enqueueSync(
+        "BANK_TRANSACTION",
+        bankOutflow.id,
+        "CREATE",
+        {
+          id: bankOutflow.id,
+          type: bankOutflow.type,
+          amount: bankOutflow.amount,
+          transactionDate: bankOutflow.transactionDate,
+          note: bankOutflow.note,
+          reference: bankOutflow.reference,
+          transferId: bankOutflow.transferId,
+          createdById: bankOutflow.createdById,
+          createdAt: bankOutflow.createdAt,
+          updatedAt: bankOutflow.updatedAt,
+        },
+        tx
+      );
+
+      await recordAuditLog(
+        session,
+        {
+          action: "CREATE",
+          module: "BANK_TRANSACTION",
+          recordId: bankOutflow.id,
+          newValue: bankOutflow,
+        },
+        tx
+      );
     } else {
+      // Preserve existing Cash behavior for CASH and other existing methods.
       await recordExpenseCashOutflow(
         tx,
         session,
@@ -69,7 +155,17 @@ export async function createExpense(session: AuthSession, input: CreateExpenseIn
       );
     }
 
-    await recordAuditLog(session, { action: "CREATE", module: "EXPENSE", recordId: expense.id, newValue: expense }, tx);
+    await recordAuditLog(
+      session,
+      {
+        action: "CREATE",
+        module: "EXPENSE",
+        recordId: expense.id,
+        newValue: expense,
+      },
+      tx
+    );
+
     return expense;
   });
 }
